@@ -1,0 +1,3 @@
+[console_scripts]
+sra-tool = sra_tool.cli:main
+sra-tool-gui = sra_tool.gui:launch_gui

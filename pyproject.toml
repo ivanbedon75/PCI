@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "systematic-review-pipeline"
+version = "0.2.0"
+description = "Auditable and reproducible systematic review pipeline with OpenAlex and Scopus"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Your Name", email = "your.email@example.org" }
+]
+dependencies = [
+  "requests>=2.31.0",
+  "pandas>=2.1.0",
+  "pyarrow>=14.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[project.scripts]
+sra-tool = "sra_tool.cli:main"
+sra-tool-gui = "sra_tool.gui:launch_gui"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

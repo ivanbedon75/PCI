@@ -1,0 +1,11 @@
+Dependencias necesarias
+
+La implementación propuesta funciona con una dependencia externa mínima:
+
+requests>=2.31.0 
+pandas>=2.1.0
+pyarrow>=14.0.0
+pytest>=8.0.0
+
+
+

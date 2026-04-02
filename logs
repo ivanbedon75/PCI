@@ -1,0 +1,27 @@
+Instrucciones de ejecución
+
+1.Crear entorno virtual. 
+2.Instalar dependencias con pip install -r requirements.txt. 
+3.Copiar .env.example a .env si deseas usar OPENALEX_API_KEY o OPENALEX_MAILTO. 
+4.Ejecutar:
+	python run.py
+5.Elegir la opción 1 para definir estrategia. 
+6.Elegir la opción 2 para capturar desde OpenAlex. 
+7.Continuar etapa por etapa o usar la opción 9 para flujo guiado completo. 
+
+OpenAlex usa api_key como parámetro de autenticación y mantiene cursor para deep pagination; por eso la herramienta admite ambos sin hardcodear secretos. 
+
+Ejemplo de uso
+Ejemplo de entrada en la etapa 2:
+filter=publication_year:2024,type:article&search=systematic review reproducibility
+La herramienta resolverá la consulta sobre https://api.openalex.org/works, añadirá per_page=100, iniciará con cursor=*, descargará todas las páginas, guardará el JSON crudo, armonizará los registros y permitirá exportar un CSV con el esquema exacto definido.
+También acepta una URL completa, por ejemplo:
+https://api.openalex.org/works?filter=publication_year:2024,type:article&search=systematic%20review
+
+Riesgos, limitaciones y supuestos
+Supuesto principal: esta versión solo soporta OpenAlex Works. Eso es intencional, porque el esquema objetivo es de registros bibliográficos tipo documento. Si se quisiera soportar autores, instituciones o fuentes como entrada primaria, habría que definir otro esquema y otras reglas de evaluación. OpenAlex documenta entidades separadas y operaciones por endpoint, lo que respalda esta restricción deliberada. 
+Limitación de correspondencia semántica: varias columnas del esquema objetivo no tienen equivalente robusto en OpenAlex Works, o pueden no estar presentes de forma homogénea. Por eso la herramienta usa NA documentado en campos como CODEN, Publication Stage, Funding Texts, Correspondence Address e Index Keywords, evitando inventar datos.
+Riesgo operativo: con consultas muy amplias, la captura puede ser extensa. OpenAlex documenta deep pagination por cursor y un modelo actual de autenticación/pricing; para uso a escala conviene usar api_key y, opcionalmente, mailto. 
+Limitación de abstract: OpenAlex puede exponer el abstract como abstract_inverted_index, por lo que la reconstrucción es aproximada al orden posicional disponible y depende de la integridad del índice. 
+Riesgo metodológico: la evaluación externa sigue reglas explícitas, pero no reemplaza el juicio experto del equipo. Su función es elevar el umbral mínimo y evitar avance automático sin evidencia.
+

@@ -1,0 +1,809 @@
+from __future__ import annotations
+
+import inspect
+import json
+import shutil
+import threading
+import tkinter as tk
+import webbrowser
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import pandas as pd
+
+from . import pipeline
+
+
+APP_TITLE = "Inmaterial Cultural Heritage"
+
+
+class InmaterialCulturalHeritageApp(tk.Tk):
+    EDITABLE_SCREENING_COLUMNS = {
+        "screen_title_abstract",
+        "reason_title_abstract",
+        "retrieve_full_text",
+        "retrieval_status",
+        "screen_full_text",
+        "reason_full_text",
+        "include_final",
+        "study_id",
+        "notes",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("1560x940")
+        self.minsize(1400, 860)
+
+        self.pipeline_result: dict | None = None
+        self.screening_df = None
+        self.screening_edit_widget = None
+
+        self.scopus_core_path = tk.StringVar(value="")
+        self.scopus_exploratory_1_path = tk.StringVar(value="")
+        self.scopus_exploratory_2_path = tk.StringVar(value="")
+
+        self.stage1_vars = {
+            "research_question": tk.StringVar(value=""),
+            "inclusion_criteria": tk.StringVar(value=""),
+            "exclusion_criteria": tk.StringVar(value=""),
+        }
+
+        self._build_ui()
+        self._load_protocol_if_exists()
+        self._load_state_if_exists()
+
+    # =====================================================
+    # UI
+    # =====================================================
+
+    def _build_ui(self) -> None:
+        self._build_header()
+        self._build_main_layout()
+        self._build_footer()
+
+    def _build_header(self) -> None:
+        frame = ttk.Frame(self, padding=10)
+        frame.pack(fill="x")
+
+        ttk.Label(
+            frame,
+            text=APP_TITLE,
+            font=("Arial", 18, "bold"),
+            anchor="center",
+            justify="center",
+        ).pack(fill="x")
+
+    def _build_main_layout(self) -> None:
+        main = ttk.PanedWindow(self, orient="horizontal")
+        main.pack(fill="both", expand=True, padx=10, pady=10)
+
+        left = ttk.Frame(main)
+        right = ttk.Frame(main)
+
+        main.add(left, weight=6)
+        main.add(right, weight=4)
+
+        self._build_stage_notebook(left)
+        self._build_right_panel(right)
+
+    def _build_right_panel(self, parent: ttk.Frame) -> None:
+        console_frame = ttk.LabelFrame(parent, text="Consola de procesos", padding=10)
+        console_frame.pack(fill="both", expand=True)
+
+        self.console = tk.Text(console_frame, wrap="word", state="disabled", height=20)
+        self.console.pack(fill="both", expand=True)
+
+    def _build_stage_notebook(self, parent: ttk.Frame) -> None:
+        self.stage_notebook = ttk.Notebook(parent)
+        self.stage_notebook.pack(fill="both", expand=True)
+
+        self.tab1 = ttk.Frame(self.stage_notebook)
+        self.tab2 = ttk.Frame(self.stage_notebook)
+        self.tab3 = ttk.Frame(self.stage_notebook)
+        self.tab4 = ttk.Frame(self.stage_notebook)
+        self.tab5 = ttk.Frame(self.stage_notebook)
+        self.tab6 = ttk.Frame(self.stage_notebook)
+        self.tab7 = ttk.Frame(self.stage_notebook)
+
+        self.stage_notebook.add(self.tab1, text="1. Formulación")
+        self.stage_notebook.add(self.tab2, text="2. Búsqueda sistemática")
+        self.stage_notebook.add(self.tab3, text="3. Cribado")
+        self.stage_notebook.add(self.tab4, text="4. Extracción")
+        self.stage_notebook.add(self.tab5, text="5. Calidad")
+        self.stage_notebook.add(self.tab6, text="6. Síntesis")
+        self.stage_notebook.add(self.tab7, text="7. PRISMA")
+
+        self._build_tab1()
+        self._build_tab2()
+        self._build_tab3()
+        self._build_tab4()
+        self._build_tab5()
+        self._build_tab6()
+        self._build_tab7()
+
+    def _build_footer(self) -> None:
+        frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        frame.pack(fill="x")
+
+        self.status_var = tk.StringVar(value="Listo.")
+        ttk.Label(frame, textvariable=self.status_var).pack(side="right")
+
+    def _build_stage_panel(self, parent, title: str, subtitle: str) -> ttk.Frame:
+        frame = ttk.Frame(parent, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=title, font=("Arial", 14, "bold")).pack(anchor="w")
+        ttk.Label(frame, text=subtitle, font=("Arial", 10)).pack(anchor="w", pady=(2, 10))
+        return frame
+
+    def _add_tab_exit_button(self, parent: ttk.Frame) -> None:
+        actions = ttk.Frame(parent)
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Salir", command=self._exit_and_clear_statistics).pack(side="left")
+
+    # =====================================================
+    # Tab 1
+    # =====================================================
+
+    def _build_tab1(self) -> None:
+        frame = self._build_stage_panel(
+            self.tab1,
+            "1. Formulación",
+            "Complete los tres campos metodológicos principales. La información se guarda y permanece disponible.",
+        )
+
+        form = ttk.LabelFrame(frame, text="Información esencial", padding=10)
+        form.pack(fill="both", expand=True)
+
+        self._labeled_entry(form, "Pregunta de investigación", self.stage1_vars["research_question"], 0)
+        self._labeled_entry(form, "Criterios de inclusión", self.stage1_vars["inclusion_criteria"], 1)
+        self._labeled_entry(form, "Criterios de exclusión", self.stage1_vars["exclusion_criteria"], 2)
+
+        form.columnconfigure(1, weight=1)
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Guardar etapa 1", command=self._run_stage_1).pack(side="left")
+
+        self._add_tab_exit_button(frame)
+
+    def _labeled_entry(self, parent, label: str, var: tk.StringVar, row: int) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=4)
+        ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+
+    # =====================================================
+    # Tab 2
+    # =====================================================
+
+    def _build_tab2(self) -> None:
+        frame = self._build_stage_panel(
+            self.tab2,
+            "2. Búsqueda sistemática",
+            "Integra 1 core + 2 exploratory para OpenAlex y Scopus, harmoniza y deduplica con trazabilidad auditable.",
+        )
+
+        sources_box = ttk.LabelFrame(frame, text="Fuentes de búsqueda", padding=10)
+        sources_box.pack(fill="x", pady=(0, 10))
+
+        openalex_box = ttk.LabelFrame(sources_box, text="OpenAlex", padding=10)
+        openalex_box.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(openalex_box, text="URL OpenAlex core:").pack(anchor="w")
+        self.openalex_core_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_core_text.pack(fill="x", expand=True, pady=(4, 6))
+
+        ttk.Label(openalex_box, text="URL OpenAlex exploratory 1:").pack(anchor="w")
+        self.openalex_exploratory_1_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_exploratory_1_text.pack(fill="x", expand=True, pady=(4, 6))
+
+        ttk.Label(openalex_box, text="URL OpenAlex exploratory 2:").pack(anchor="w")
+        self.openalex_exploratory_2_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_exploratory_2_text.pack(fill="x", expand=True, pady=(4, 6))
+
+        note = ttk.Label(
+            openalex_box,
+            text="Cada estrategia se descargará con cursor cuando corresponda.",
+        )
+        note.pack(anchor="w")
+
+        scopus_box = ttk.LabelFrame(sources_box, text="Scopus", padding=10)
+        scopus_box.pack(fill="x")
+
+        row1 = ttk.Frame(scopus_box)
+        row1.pack(fill="x", pady=4)
+        ttk.Label(row1, text="CSV Scopus core:", width=22).pack(side="left")
+        ttk.Entry(row1, textvariable=self.scopus_core_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row1, text="Cargar...", command=self._select_scopus_core_csv).pack(side="left")
+
+        row2 = ttk.Frame(scopus_box)
+        row2.pack(fill="x", pady=4)
+        ttk.Label(row2, text="CSV Scopus exploratory 1:", width=22).pack(side="left")
+        ttk.Entry(row2, textvariable=self.scopus_exploratory_1_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row2, text="Cargar...", command=self._select_scopus_exploratory_1_csv).pack(side="left")
+
+        row3 = ttk.Frame(scopus_box)
+        row3.pack(fill="x", pady=4)
+        ttk.Label(row3, text="CSV Scopus exploratory 2:", width=22).pack(side="left")
+        ttk.Entry(row3, textvariable=self.scopus_exploratory_2_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row3, text="Cargar...", command=self._select_scopus_exploratory_2_csv).pack(side="left")
+
+        process_box = ttk.LabelFrame(frame, text="Proceso de etapa 2", padding=10)
+        process_box.pack(fill="x")
+
+        self.stage2_btn = ttk.Button(
+            process_box,
+            text="Validar información ingresada",
+            command=self._run_stage_2,
+        )
+        self.stage2_btn.pack(fill="x", pady=3)
+
+        self._add_tab_exit_button(frame)
+
+    # =====================================================
+    # Tab 3
+    # =====================================================
+
+    def _build_tab3(self) -> None:
+        frame = self._build_stage_panel(
+            self.tab3,
+            "3. Cribado",
+            "Previsualice y edite screening_matrix.csv sin salir de la aplicación. Luego actualice los cálculos.",
+        )
+
+        actions = ttk.LabelFrame(frame, text="Proceso de etapa 3", padding=10)
+        actions.pack(fill="x", pady=(0, 10))
+
+        self.stage3_btn = ttk.Button(actions, text="Actualizar cribado", command=self._run_stage_3)
+        self.stage3_btn.pack(side="left", padx=3)
+
+        ttk.Button(actions, text="Cargar vista screening", command=self._load_screening_preview).pack(side="left", padx=3)
+        ttk.Button(actions, text="Guardar cambios screening", command=self._save_screening_changes).pack(side="left", padx=3)
+        ttk.Button(actions, text="Abrir screening_matrix.csv", command=lambda: self._open_artifact("screening_matrix_csv")).pack(side="left", padx=3)
+
+        preview_box = ttk.LabelFrame(frame, text="Vista tabular screening_matrix.csv", padding=10)
+        preview_box.pack(fill="both", expand=True)
+
+        table_frame = ttk.Frame(preview_box)
+        table_frame.pack(fill="both", expand=True)
+
+        self.screening_tree = ttk.Treeview(table_frame, show="headings")
+        self.screening_tree.grid(row=0, column=0, sticky="nsew")
+
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.screening_tree.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+
+        xscroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.screening_tree.xview)
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        self.screening_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        self.screening_tree.bind("<Double-1>", self._begin_screening_edit)
+
+        self._add_tab_exit_button(frame)
+
+    # =====================================================
+    # Tab 4/5/6/7
+    # =====================================================
+
+    def _build_tab4(self) -> None:
+        frame = self._build_stage_panel(self.tab4, "4. Extracción", "Registra el avance de extracción sin recalcular etapas previas.")
+        box = ttk.LabelFrame(frame, text="Proceso de etapa 4", padding=10)
+        box.pack(fill="x")
+        self.stage4_btn = ttk.Button(box, text="Registrar etapa 4", command=self._run_stage_4)
+        self.stage4_btn.pack(fill="x", pady=3)
+        self._add_tab_exit_button(frame)
+
+    def _build_tab5(self) -> None:
+        frame = self._build_stage_panel(self.tab5, "5. Calidad", "Actualiza quality profile con los datos realmente existentes.")
+        box = ttk.LabelFrame(frame, text="Proceso de etapa 5", padding=10)
+        box.pack(fill="x")
+        self.stage5_btn = ttk.Button(box, text="Actualizar evaluación de calidad", command=self._run_stage_5)
+        self.stage5_btn.pack(fill="x", pady=3)
+        self._add_tab_exit_button(frame)
+
+    def _build_tab6(self) -> None:
+        frame = self._build_stage_panel(self.tab6, "6. Síntesis", "Prepara artefactos para síntesis sin relanzar toda la cadena.")
+        box = ttk.LabelFrame(frame, text="Proceso de etapa 6", padding=10)
+        box.pack(fill="x")
+        self.stage6_btn = ttk.Button(box, text="Preparar síntesis", command=self._run_stage_6)
+        self.stage6_btn.pack(fill="x", pady=3)
+        self._add_tab_exit_button(frame)
+
+    def _build_tab7(self) -> None:
+        frame = self._build_stage_panel(self.tab7, "7. PRISMA", "Recalcula PRISMA únicamente con la información que realmente ya existe.")
+        box = ttk.LabelFrame(frame, text="Proceso de etapa 7", padding=10)
+        box.pack(fill="x")
+        self.stage7_btn = ttk.Button(box, text="Actualizar reporte PRISMA", command=self._run_stage_7)
+        self.stage7_btn.pack(fill="x", pady=3)
+        self._add_tab_exit_button(frame)
+
+    # =====================================================
+    # Load persisted data
+    # =====================================================
+
+    def _load_protocol_if_exists(self) -> None:
+        path = pipeline.get_protocol_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for key, var in self.stage1_vars.items():
+                var.set(str(data.get(key, "")))
+        except Exception:
+            pass
+
+    def _load_state_if_exists(self) -> None:
+        try:
+            state = pipeline.load_pipeline_state()
+            self.pipeline_result = {
+                "stats": state.get("stats", {}),
+                "sources": state.get("sources", {}),
+                "artifacts": state.get("artifacts", {}),
+                "completed_stages": state.get("completed_stages", []),
+            }
+        except Exception:
+            self.pipeline_result = None
+
+    # =====================================================
+    # Helpers
+    # =====================================================
+
+    def _collect_stage1_data(self) -> dict:
+        return {k: v.get().strip() for k, v in self.stage1_vars.items()}
+
+    def _select_scopus_core_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Seleccionar CSV Scopus core",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.scopus_core_path.set(path)
+
+    def _select_scopus_exploratory_1_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Seleccionar CSV Scopus exploratory 1",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.scopus_exploratory_1_path.set(path)
+
+    def _select_scopus_exploratory_2_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Seleccionar CSV Scopus exploratory 2",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if path:
+            self.scopus_exploratory_2_path.set(path)
+
+    def _clear_console(self) -> None:
+        self.console.configure(state="normal")
+        self.console.delete("1.0", "end")
+        self.console.configure(state="disabled")
+
+    def log(self, message: str) -> None:
+        self.console.configure(state="normal")
+        self.console.insert("end", message + "\n")
+        self.console.see("end")
+        self.console.configure(state="disabled")
+        self.update_idletasks()
+
+    def _set_busy(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for btn_name in ["stage2_btn", "stage3_btn", "stage4_btn", "stage5_btn", "stage6_btn", "stage7_btn"]:
+            if hasattr(self, btn_name):
+                getattr(self, btn_name).configure(state=state)
+
+        self.status_var.set("Procesando... por favor espere." if busy else "Listo.")
+
+    def _validate_stage2_inputs(self) -> bool:
+        openalex_core = self.openalex_core_text.get("1.0", "end").strip()
+        openalex_exploratory_1 = self.openalex_exploratory_1_text.get("1.0", "end").strip()
+        openalex_exploratory_2 = self.openalex_exploratory_2_text.get("1.0", "end").strip()
+
+        scopus_core = self.scopus_core_path.get().strip()
+        scopus_exploratory_1 = self.scopus_exploratory_1_path.get().strip()
+        scopus_exploratory_2 = self.scopus_exploratory_2_path.get().strip()
+
+        openalex_any = any([openalex_core, openalex_exploratory_1, openalex_exploratory_2])
+        scopus_any = any([scopus_core, scopus_exploratory_1, scopus_exploratory_2])
+
+        if not openalex_any and not scopus_any:
+            messagebox.showwarning(
+                "Entradas requeridas",
+                "Debe ingresar una base completa: OpenAlex (core + 2 exploratory) y/o Scopus (core + 2 exploratory).",
+            )
+            return False
+
+        if openalex_any and not all([openalex_core, openalex_exploratory_1, openalex_exploratory_2]):
+            messagebox.showwarning(
+                "OpenAlex incompleto",
+                "Debe ingresar las tres estrategias de OpenAlex: core, exploratory 1 y exploratory 2.",
+            )
+            return False
+
+        if scopus_any and not all([scopus_core, scopus_exploratory_1, scopus_exploratory_2]):
+            messagebox.showwarning(
+                "Scopus incompleto",
+                "Debe ingresar los tres CSV de Scopus: core, exploratory 1 y exploratory 2.",
+            )
+            return False
+
+        for label, path_str in [
+            ("Scopus core", scopus_core),
+            ("Scopus exploratory 1", scopus_exploratory_1),
+            ("Scopus exploratory 2", scopus_exploratory_2),
+        ]:
+            if path_str and not Path(path_str).exists():
+                messagebox.showerror("Archivo no encontrado", f"No se encontró el archivo de {label}:\n{path_str}")
+                return False
+
+        return True
+
+    def _build_stage2_kwargs(self, openalex_inputs: dict, scopus_inputs: dict) -> dict:
+        sig = inspect.signature(pipeline.run_search_stage)
+        params = set(sig.parameters.keys())
+
+        kwargs = {
+            "progress": lambda msg: self.after(0, self.log, msg),
+            "per_page_openalex": 100,
+        }
+
+        mapping = {
+            "openalex_core_input": openalex_inputs["core"],
+            "openalex_exploratory_1_input": openalex_inputs["exploratory_1"],
+            "openalex_exploratory_2_input": openalex_inputs["exploratory_2"],
+            "scopus_core_csv": scopus_inputs["core"],
+            "scopus_exploratory_1_csv": scopus_inputs["exploratory_1"],
+            "scopus_exploratory_2_csv": scopus_inputs["exploratory_2"],
+        }
+
+        for key, value in mapping.items():
+            if key in params:
+                kwargs[key] = value
+
+        if "user_input_openalex" in params and "openalex_core_input" not in params:
+            kwargs["user_input_openalex"] = openalex_inputs["core"]
+        if "scopus_exploratory_csv" in params and "scopus_exploratory_1_csv" not in params:
+            kwargs["scopus_exploratory_csv"] = scopus_inputs["exploratory_1"]
+
+        return kwargs
+
+    # =====================================================
+    # Stage actions
+    # =====================================================
+
+    def _run_stage_1(self) -> None:
+        self._clear_console()
+        self.log("⏳ Guardando etapa 1...")
+        try:
+            result = pipeline.run_pico_stage(self._collect_stage1_data(), progress=self.log)
+            self.log(f"✅ Etapa 1 guardada en: {result['protocol_path']}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _run_stage_2(self) -> None:
+        if not self._validate_stage2_inputs():
+            return
+
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 2...")
+        self.log("ℹ️ Se leerán OpenAlex y Scopus en estructura 1 core + 2 exploratory por base, luego integración, harmonization y deduplicación.")
+        self._set_busy(True)
+
+        openalex_inputs = {
+            "core": self.openalex_core_text.get("1.0", "end").strip() or None,
+            "exploratory_1": self.openalex_exploratory_1_text.get("1.0", "end").strip() or None,
+            "exploratory_2": self.openalex_exploratory_2_text.get("1.0", "end").strip() or None,
+        }
+        scopus_inputs = {
+            "core": self.scopus_core_path.get().strip() or None,
+            "exploratory_1": self.scopus_exploratory_1_path.get().strip() or None,
+            "exploratory_2": self.scopus_exploratory_2_path.get().strip() or None,
+        }
+
+        worker = threading.Thread(
+            target=self._run_stage_2_worker,
+            args=(openalex_inputs, scopus_inputs),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_stage_2_worker(self, openalex_inputs, scopus_inputs) -> None:
+        try:
+            kwargs = self._build_stage2_kwargs(openalex_inputs, scopus_inputs)
+            result = pipeline.run_search_stage(**kwargs)
+            self.after(0, self._apply_result, result)
+            self.after(0, self._load_screening_preview)
+        except TypeError as e:
+            self.after(0, lambda: messagebox.showerror(
+                "Error",
+                f"La firma de pipeline.run_search_stage no coincide con la nueva estrategia de 1 core + 2 exploratory por base de datos.\n\nDetalle: {e}",
+            ))
+            self.after(0, self._set_busy, False)
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.after(0, self._set_busy, False)
+
+    def _run_stage_3(self) -> None:
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 3...")
+        self._set_busy(True)
+
+        worker = threading.Thread(
+            target=self._run_generic_stage_worker,
+            args=(pipeline.run_screening_stage,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_stage_4(self) -> None:
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 4...")
+        self._set_busy(True)
+
+        worker = threading.Thread(
+            target=self._run_generic_stage_worker,
+            args=(pipeline.run_extraction_stage,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_stage_5(self) -> None:
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 5...")
+        self._set_busy(True)
+
+        worker = threading.Thread(
+            target=self._run_generic_stage_worker,
+            args=(pipeline.run_quality_stage,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_stage_6(self) -> None:
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 6...")
+        self._set_busy(True)
+
+        worker = threading.Thread(
+            target=self._run_generic_stage_worker,
+            args=(pipeline.run_synthesis_stage,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_stage_7(self) -> None:
+        self._clear_console()
+        self.log("⏳ Iniciando etapa 7...")
+        self._set_busy(True)
+
+        worker = threading.Thread(
+            target=self._run_generic_stage_worker,
+            args=(pipeline.run_prisma_stage,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_generic_stage_worker(self, fn) -> None:
+        try:
+            result = fn(progress=lambda msg: self.after(0, self.log, msg))
+            self.after(0, self._apply_result, result)
+            if fn == pipeline.run_screening_stage:
+                self.after(0, self._load_screening_preview)
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            self.after(0, self._set_busy, False)
+
+    # =====================================================
+    # Screening preview/edit
+    # =====================================================
+
+    def _load_screening_preview(self) -> None:
+        path = self._artifact_path("screening_matrix_csv")
+        if not path:
+            path = pipeline.get_processed_dir() / "screening_matrix.csv"
+            if not path.exists():
+                messagebox.showwarning("Screening", "No se encontró screening_matrix.csv.")
+                return
+
+        try:
+            self.screening_df = pd.read_csv(path, encoding="utf-8-sig")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        self._render_screening_tree()
+
+    def _render_screening_tree(self) -> None:
+        for item in self.screening_tree.get_children():
+            self.screening_tree.delete(item)
+
+        if self.screening_df is None or self.screening_df.empty:
+            self.screening_tree["columns"] = ()
+            return
+
+        columns = list(self.screening_df.columns)
+        self.screening_tree["columns"] = columns
+
+        for col in columns:
+            self.screening_tree.heading(col, text=col)
+            self.screening_tree.column(col, width=140, anchor="w")
+
+        for idx, row in self.screening_df.iterrows():
+            values = ["" if pd.isna(v) else str(v) for v in row.tolist()]
+            self.screening_tree.insert("", "end", iid=str(idx), values=values)
+
+    def _begin_screening_edit(self, event) -> None:
+        if self.screening_df is None or self.screening_df.empty:
+            return
+
+        item_id = self.screening_tree.identify_row(event.y)
+        col_id = self.screening_tree.identify_column(event.x)
+
+        if not item_id or not col_id:
+            return
+
+        col_index = int(col_id.replace("#", "")) - 1
+        column_name = self.screening_tree["columns"][col_index]
+
+        if column_name not in self.EDITABLE_SCREENING_COLUMNS:
+            return
+
+        bbox = self.screening_tree.bbox(item_id, col_id)
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+        current_value = self.screening_tree.set(item_id, column_name)
+
+        if self.screening_edit_widget is not None:
+            self.screening_edit_widget.destroy()
+
+        entry = ttk.Entry(self.screening_tree)
+        entry.insert(0, current_value)
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus()
+
+        def save_edit(_event=None):
+            new_value = entry.get()
+            self.screening_tree.set(item_id, column_name, new_value)
+            row_index = int(item_id)
+            self.screening_df.at[row_index, column_name] = new_value
+            entry.destroy()
+            self.screening_edit_widget = None
+
+        def cancel_edit(_event=None):
+            entry.destroy()
+            self.screening_edit_widget = None
+
+        entry.bind("<Return>", save_edit)
+        entry.bind("<FocusOut>", save_edit)
+        entry.bind("<Escape>", cancel_edit)
+
+        self.screening_edit_widget = entry
+
+    def _save_screening_changes(self) -> None:
+        if self.screening_df is None:
+            messagebox.showwarning("Screening", "No hay screening cargado.")
+            return
+
+        path = self._artifact_path("screening_matrix_csv")
+        if not path:
+            path = pipeline.get_processed_dir() / "screening_matrix.csv"
+
+        try:
+            self.screening_df.to_csv(path, index=False, encoding="utf-8-sig")
+            self.log(f"✅ Screening guardado en: {path}")
+            messagebox.showinfo("Screening", "Los cambios fueron guardados.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    # =====================================================
+    # Result rendering
+    # =====================================================
+
+    def _apply_result(self, result: dict) -> None:
+        self.pipeline_result = result
+        self._set_busy(False)
+        self.log("✅ Etapa finalizada.")
+
+    def _reset_right_panel(self) -> None:
+        self._clear_console()
+        self.pipeline_result = None
+        self.status_var.set("Listo.")
+
+    def _reset_screening_preview(self) -> None:
+        self.screening_df = None
+
+        if self.screening_edit_widget is not None:
+            try:
+                self.screening_edit_widget.destroy()
+            except Exception:
+                pass
+            self.screening_edit_widget = None
+
+        if hasattr(self, "screening_tree"):
+            for item in self.screening_tree.get_children():
+                self.screening_tree.delete(item)
+            self.screening_tree["columns"] = ()
+
+    def _exit_and_clear_statistics(self) -> None:
+        confirm = messagebox.askyesno(
+            "Salir",
+            "¿Desea salir y borrar los datos estadísticos y archivos procesados guardados?",
+        )
+        if not confirm:
+            return
+
+        try:
+            pipeline.clear_statistical_data()
+            self._reset_screening_preview()
+            self._reset_right_panel()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        self.destroy()
+
+    # =====================================================
+    # Artifacts
+    # =====================================================
+
+    def _artifact_path(self, key: str) -> Path | None:
+        if self.pipeline_result:
+            raw_path = self.pipeline_result.get("artifacts", {}).get(key)
+        else:
+            state = pipeline.load_pipeline_state()
+            raw_path = state.get("artifacts", {}).get(key)
+
+        if not raw_path:
+            return None
+
+        path = Path(raw_path)
+        return path if path.exists() else None
+
+    def _open_artifact(self, key: str) -> None:
+        path = self._artifact_path(key)
+        if not path:
+            messagebox.showwarning("Archivo no disponible", "No se encontró el archivo solicitado.")
+            return
+
+        try:
+            webbrowser.open(path.resolve().as_uri())
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _save_artifact_as(self, key: str, extension: str) -> None:
+        src = self._artifact_path(key)
+        if not src:
+            messagebox.showwarning("Archivo no disponible", "No se encontró el archivo solicitado.")
+            return
+
+        dst = filedialog.asksaveasfilename(
+            title=f"Guardar {src.name}",
+            defaultextension=extension,
+            initialfile=src.name,
+            filetypes=[(extension.upper().replace(".", ""), f"*{extension}")],
+        )
+        if not dst:
+            return
+
+        try:
+            shutil.copyfile(src, dst)
+            messagebox.showinfo("Archivo guardado", f"Se guardó una copia en:\n{dst}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+
+def main() -> None:
+    app = InmaterialCulturalHeritageApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

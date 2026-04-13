@@ -1,0 +1,1640 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import shutil
+import sqlite3
+import zipfile
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from .clients.openalex import get_repo_root, validate_and_save_openalex_input
+
+
+ProgressCallback = Optional[Callable[[str], None]]
+
+
+# =========================================================
+# Paths
+# =========================================================
+
+def get_data_dir() -> Path:
+    return get_repo_root() / "data"
+
+
+def get_raw_dir() -> Path:
+    return get_data_dir() / "raw"
+
+
+def get_raw_scopus_dir() -> Path:
+    path = get_raw_dir() / "scopus"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_processed_dir() -> Path:
+    path = get_data_dir() / "processed"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_state_path() -> Path:
+    return get_processed_dir() / "pipeline_state.json"
+
+
+def get_protocol_path() -> Path:
+    return get_processed_dir() / "protocol.json"
+
+
+# =========================================================
+# Utilities
+# =========================================================
+
+def emit(progress: ProgressCallback, message: str) -> None:
+    if progress:
+        progress(message)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_text(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return " ".join(text.split())
+
+
+def normalize_lower(value) -> str:
+    return normalize_text(value).lower()
+
+
+def safe_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col in df.columns:
+        return df[col]
+    return pd.Series([""] * len(df), index=df.index)
+
+
+def first_non_empty(row: pd.Series, candidates: List[str]) -> str:
+    for col in candidates:
+        if col in row.index:
+            val = normalize_text(row[col])
+            if val:
+                return val
+    return ""
+
+
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def read_json(path: Path, default: Optional[dict] = None) -> dict:
+    if not path.exists():
+        return {} if default is None else default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def append_jsonl(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def dataframe_to_md_or_text(df: pd.DataFrame) -> str:
+    if df.empty:
+        return "No available data."
+    try:
+        return df.to_markdown(index=False)
+    except Exception:
+        return df.to_string(index=False)
+
+
+
+def load_df_if_exists(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, encoding="utf-8-sig")
+
+
+def display_value(value) -> str:
+    return "Sin evaluación aún" if value is None else str(value)
+
+
+def ensure_required_columns(df: pd.DataFrame, required_columns: List[str], label: str) -> None:
+    missing = [col for col in required_columns if col not in df.columns]
+    if missing:
+        raise RuntimeError(f"{label} no contiene las columnas requeridas: {', '.join(missing)}")
+
+
+def copy_source_file(src: Path, destination_name: str) -> Path:
+    dst = get_raw_scopus_dir() / destination_name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
+
+
+def audit_event(stage: str, event: str, details: Optional[dict] = None) -> None:
+    audit_path = get_processed_dir() / "audit_trail.jsonl"
+    payload = {
+        "timestamp": now_iso(),
+        "stage": stage,
+        "event": event,
+    }
+    if details:
+        payload.update(details)
+    append_jsonl(audit_path, payload)
+
+
+def save_source_manifest(data: dict) -> Path:
+    path = get_processed_dir() / "source_manifest.json"
+    write_json(path, data)
+    return path
+
+
+def save_search_summary(data: dict) -> Path:
+    path = get_processed_dir() / "search_summary.json"
+    write_json(path, data)
+    return path
+
+
+def validate_stage2_source_bundle(openalex_inputs: dict, scopus_inputs: dict) -> None:
+    has_any_openalex = any(normalize_text(v) for v in openalex_inputs.values())
+    has_any_scopus = any(normalize_text(v) for v in scopus_inputs.values())
+    if not has_any_openalex and not has_any_scopus:
+        raise RuntimeError("Debe ingresar al menos una base de datos completa (OpenAlex o Scopus).")
+
+    if has_any_openalex:
+        missing = [k for k, v in openalex_inputs.items() if not normalize_text(v)]
+        if missing:
+            raise RuntimeError(
+                "Para OpenAlex debe ingresar las tres estrategias: core, exploratory_1 y exploratory_2. Faltan: "
+                + ", ".join(missing)
+            )
+
+    if has_any_scopus:
+        missing = [k for k, v in scopus_inputs.items() if not normalize_text(v)]
+        if missing:
+            raise RuntimeError(
+                "Para Scopus debe ingresar los tres CSV: core, exploratory_1 y exploratory_2. Faltan: "
+                + ", ".join(missing)
+            )
+
+
+def build_source_snapshot(scopus_inputs: dict, scopus_resolved: dict, openalex_inputs: dict, openalex_results: dict) -> dict:
+    manifest = {
+        "generated_at": now_iso(),
+        "scopus": {},
+        "openalex": {},
+    }
+
+    for label, input_path in scopus_inputs.items():
+        entry = {
+            "input_path": input_path or "",
+            "resolved_copy_path": str(scopus_resolved[label]["copy_path"]) if scopus_resolved.get(label, {}).get("copy_path") else "",
+            "rows": int(scopus_resolved.get(label, {}).get("rows", 0)),
+            "sha256": scopus_resolved.get(label, {}).get("sha256", ""),
+            "search_group": label,
+            "source_db": "scopus",
+        }
+        manifest["scopus"][label] = entry
+
+    for label, user_input in openalex_inputs.items():
+        validation = openalex_results.get(label)
+        entry = {
+            "input_url": user_input or "",
+            "request_url": getattr(validation, "request_url", "") if validation else "",
+            "csv_path": getattr(validation, "csv_path", "") if validation else "",
+            "json_path": getattr(validation, "json_path", "") if validation else "",
+            "records": int(getattr(validation, "records", 0)) if validation else 0,
+            "count_api": int(getattr(validation, "count_api", 0)) if validation and getattr(validation, "count_api", None) is not None else None,
+            "search_group": label,
+            "source_db": "openalex",
+        }
+        manifest["openalex"][label] = entry
+
+    return manifest
+
+
+
+# =========================================================
+# Validation model
+# =========================================================
+
+@dataclass
+class ValidationCheck:
+    check_id: str
+    stage: str
+    name: str
+    status: str
+    severity: str
+    expected: str
+    observed: str
+    evidence: str
+    action_required: str = ""
+
+
+def validation_status_from_checks(checks: List[ValidationCheck]) -> str:
+    if any(c.status == "FAIL" and c.severity.lower() == "critical" for c in checks):
+        return "FAIL"
+    if any(c.status == "FAIL" for c in checks):
+        return "FAIL"
+    if any(c.status == "WARN" for c in checks):
+        return "PASS_WITH_WARNINGS"
+    return "PASS"
+
+
+def checks_to_dataframe(checks: List[ValidationCheck]) -> pd.DataFrame:
+    if not checks:
+        return pd.DataFrame(columns=[
+            "check_id", "stage", "name", "status", "severity", "expected",
+            "observed", "evidence", "action_required",
+        ])
+    return pd.DataFrame([asdict(c) for c in checks])
+
+
+def save_validation_reports(stage_name: str, checks: List[ValidationCheck]) -> dict:
+    processed_dir = get_processed_dir()
+    df = checks_to_dataframe(checks)
+    status = validation_status_from_checks(checks)
+
+    json_path = processed_dir / f"validation_report_{stage_name}.json"
+    csv_path = processed_dir / f"validation_report_{stage_name}.csv"
+    md_path = processed_dir / f"validation_report_{stage_name}.md"
+
+    payload = {
+        "generated_at": now_iso(),
+        "stage": stage_name,
+        "global_status": status,
+        "checks": [asdict(c) for c in checks],
+    }
+    write_json(json_path, payload)
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    md = f"# Validation report: {stage_name}\n\n"
+    md += f"**Global status:** {status}\n\n"
+    md += dataframe_to_md_or_text(df)
+    md_path.write_text(md, encoding="utf-8")
+
+    history_path = processed_dir / "validation_history.jsonl"
+    append_jsonl(history_path, payload)
+
+    return {
+        "global_status": status,
+        "json": str(json_path),
+        "csv": str(csv_path),
+        "md": str(md_path),
+        "history": str(history_path),
+    }
+
+
+def save_record_validation_csv(stage_name: str, label: str, rows: List[dict]) -> Path:
+    path = get_processed_dir() / f"record_validation_{label}_{stage_name}.csv"
+    df = pd.DataFrame(rows)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    return path
+
+
+def _pass(check_id: str, stage: str, name: str, expected: str, observed: str, evidence: str, action_required: str = "") -> ValidationCheck:
+    return ValidationCheck(check_id, stage, name, "PASS", "low", expected, observed, evidence, action_required)
+
+
+def _warn(check_id: str, stage: str, name: str, expected: str, observed: str, evidence: str, action_required: str = "") -> ValidationCheck:
+    return ValidationCheck(check_id, stage, name, "WARN", "medium", expected, observed, evidence, action_required)
+
+
+def _fail(check_id: str, stage: str, name: str, severity: str, expected: str, observed: str, evidence: str, action_required: str = "") -> ValidationCheck:
+    return ValidationCheck(check_id, stage, name, "FAIL", severity, expected, observed, evidence, action_required)
+
+
+
+
+def validate_protocol_data(protocol_data: dict) -> List[ValidationCheck]:
+    stage = "stage_1_pico"
+    checks: List[ValidationCheck] = []
+
+    rq = normalize_text(protocol_data.get("research_question", ""))
+    inc = normalize_text(protocol_data.get("inclusion_criteria", ""))
+    exc = normalize_text(protocol_data.get("exclusion_criteria", ""))
+
+    checks.append(
+        _pass("V01", stage, "research_question_present", "Non-empty", "Provided", "protocol.json")
+        if rq
+        else _fail(
+            "V01",
+            stage,
+            "research_question_present",
+            "critical",
+            "Non-empty",
+            "Empty",
+            "protocol.json",
+            "Completar pregunta de investigación",
+        )
+    )
+
+    checks.append(
+        _pass("V02", stage, "inclusion_criteria_present", "Non-empty", "Provided", "protocol.json")
+        if inc
+        else _fail(
+            "V02",
+            stage,
+            "inclusion_criteria_present",
+            "critical",
+            "Non-empty",
+            "Empty",
+            "protocol.json",
+            "Completar criterios de inclusión",
+        )
+    )
+
+    checks.append(
+        _pass("V03", stage, "exclusion_criteria_present", "Non-empty", "Provided", "protocol.json")
+        if exc
+        else _fail(
+            "V03",
+            stage,
+            "exclusion_criteria_present",
+            "critical",
+            "Non-empty",
+            "Empty",
+            "protocol.json",
+            "Completar criterios de exclusión",
+        )
+    )
+
+    return checks
+
+
+def validate_stage2_inputs_for_report(openalex_inputs: dict, scopus_inputs: dict) -> List[ValidationCheck]:
+    stage = "stage_2_search"
+    checks: List[ValidationCheck] = []
+
+    for check_id, key in [("V04", "core"), ("V05", "exploratory_1"), ("V06", "exploratory_2")]:
+        exists = bool(scopus_inputs.get(key))
+        checks.append(
+            _pass(
+                check_id,
+                stage,
+                f"scopus_{key}_provided",
+                "Input provided",
+                "Provided",
+                f"Scopus {key}",
+            )
+            if exists
+            else _fail(
+                check_id,
+                stage,
+                f"scopus_{key}_provided",
+                "critical",
+                "Input provided",
+                "Missing",
+                f"Scopus {key}",
+                "Ingresar archivo requerido",
+            )
+        )
+
+    for check_id, key in [("V07", "core"), ("V08", "exploratory_1"), ("V09", "exploratory_2")]:
+        exists = bool(openalex_inputs.get(key))
+        checks.append(
+            _pass(
+                check_id,
+                stage,
+                f"openalex_{key}_provided",
+                "Input provided",
+                "Provided",
+                f"OpenAlex {key}",
+            )
+            if exists
+            else _fail(
+                check_id,
+                stage,
+                f"openalex_{key}_provided",
+                "critical",
+                "Input provided",
+                "Missing",
+                f"OpenAlex {key}",
+                "Ingresar URL requerida",
+            )
+        )
+
+    return checks
+
+
+def validate_harmonized_records(df: pd.DataFrame, stage_name: str) -> Tuple[List[ValidationCheck], List[dict]]:
+    checks: List[ValidationCheck] = []
+    rows: List[dict] = []
+    stage = stage_name
+
+    if df.empty:
+        checks.append(
+            _fail(
+                "V18",
+                stage,
+                "harmonized_generated",
+                "critical",
+                "Rows > 0",
+                "0",
+                "harmonized_records.csv",
+                "Revisar carga y harmonización",
+            )
+        )
+        return checks, rows
+
+    checks.append(
+        _pass(
+            "V18",
+            stage,
+            "harmonized_generated",
+            "Rows > 0",
+            str(len(df)),
+            "harmonized_records.csv",
+        )
+    )
+
+    if "record_id" in df.columns and df["record_id"].astype(str).duplicated().sum() == 0:
+        checks.append(
+            _pass(
+                "V19",
+                stage,
+                "record_id_unique",
+                "No duplicated record_id",
+                "No duplicates",
+                "harmonized_records.csv",
+            )
+        )
+    else:
+        dup_count = int(df["record_id"].astype(str).duplicated().sum()) if "record_id" in df.columns else -1
+        checks.append(
+            _fail(
+                "V19",
+                stage,
+                "record_id_unique",
+                "critical",
+                "No duplicated record_id",
+                str(dup_count),
+                "harmonized_records.csv",
+                "Revisar generación de IDs",
+            )
+        )
+
+    valid_source = set(df["source_db"].astype(str).str.strip().str.lower().unique()) <= {"scopus", "openalex"}
+    checks.append(
+        _pass(
+            "V20",
+            stage,
+            "source_db_valid",
+            "Only scopus/openalex",
+            "Valid",
+            "harmonized_records.csv",
+        )
+        if valid_source
+        else _fail(
+            "V20",
+            stage,
+            "source_db_valid",
+            "high",
+            "Only scopus/openalex",
+            str(sorted(df["source_db"].astype(str).unique().tolist())),
+            "harmonized_records.csv",
+            "Revisar normalización source_db",
+        )
+    )
+
+    valid_groups = set(df["search_group"].astype(str).str.strip().str.lower().unique()) <= {
+        "core",
+        "exploratory_1",
+        "exploratory_2",
+    }
+    checks.append(
+        _pass(
+            "V21",
+            stage,
+            "search_group_valid",
+            "Only core/exploratory_1/exploratory_2",
+            "Valid",
+            "harmonized_records.csv",
+        )
+        if valid_groups
+        else _fail(
+            "V21",
+            stage,
+            "search_group_valid",
+            "high",
+            "Only core/exploratory_1/exploratory_2",
+            str(sorted(df["search_group"].astype(str).unique().tolist())),
+            "harmonized_records.csv",
+            "Revisar etiquetado search_group",
+        )
+    )
+
+    title_non_empty_pct = (
+        round((df["title"].astype(str).str.strip().ne("").sum() / len(df)) * 100, 2)
+        if "title" in df.columns
+        else 0.0
+    )
+    if title_non_empty_pct >= 90:
+        checks.append(
+            _pass(
+                "V22",
+                stage,
+                "title_coverage",
+                ">= 90%",
+                f"{title_non_empty_pct}%",
+                "harmonized_records.csv",
+            )
+        )
+    else:
+        checks.append(
+            _warn(
+                "V22",
+                stage,
+                "title_coverage",
+                ">= 90%",
+                f"{title_non_empty_pct}%",
+                "harmonized_records.csv",
+                "Revisar lectura de títulos",
+            )
+        )
+
+    for _, row in df.iterrows():
+        rows.append(
+            {
+                "record_id": row.get("record_id", ""),
+                "title_present": bool(normalize_text(row.get("title", ""))),
+                "source_db_valid": normalize_lower(row.get("source_db", "")) in {"scopus", "openalex"},
+                "search_group_valid": normalize_lower(row.get("search_group", "")) in {
+                    "core",
+                    "exploratory_1",
+                    "exploratory_2",
+                },
+                "doi_present": bool(normalize_text(row.get("doi", ""))),
+                "year_present": bool(normalize_text(row.get("year", ""))),
+            }
+        )
+
+    return checks, rows
+
+
+def validate_deduplicated_records(harmonized_df: pd.DataFrame, deduplicated_df: pd.DataFrame, stage_name: str) -> Tuple[List[ValidationCheck], List[dict]]:
+    checks: List[ValidationCheck] = []
+    rows: List[dict] = []
+    stage = stage_name
+
+    if deduplicated_df.empty:
+        checks.append(_fail("V23", stage, "deduplicated_generated", "critical", "Rows > 0", "0", "deduplicated_records.csv", "Revisar deduplicación"))
+        return checks, rows
+
+    checks.append(_pass("V23", stage, "deduplicated_generated", "Rows > 0", str(len(deduplicated_df)), "deduplicated_records.csv"))
+
+    if len(deduplicated_df) <= len(harmonized_df):
+        checks.append(_pass("V25", stage, "deduplicated_not_greater_than_harmonized", "<= harmonized_rows", f"{len(deduplicated_df)} <= {len(harmonized_df)}", "search_summary"))
+    else:
+        checks.append(_fail("V25", stage, "deduplicated_not_greater_than_harmonized", "critical", "<= harmonized_rows", f"{len(deduplicated_df)} > {len(harmonized_df)}", "search_summary", "Revisar deduplicación"))
+
+    duplicates_removed = len(harmonized_df) - len(deduplicated_df)
+    if duplicates_removed >= 0:
+        checks.append(_pass("V26", stage, "duplicates_removed_valid", "harmonized - deduplicated", str(duplicates_removed), "search_summary"))
+    else:
+        checks.append(_fail("V26", stage, "duplicates_removed_valid", "critical", "harmonized - deduplicated >= 0", str(duplicates_removed), "search_summary", "Revisar conteo"))
+
+    for _, row in deduplicated_df.iterrows():
+        rows.append({
+            "record_id": row.get("record_id", ""),
+            "title_present": bool(normalize_text(row.get("title", ""))),
+            "doi_present": bool(normalize_text(row.get("doi", ""))),
+            "year_present": bool(normalize_text(row.get("year", ""))),
+            "source_db_valid": normalize_lower(row.get("source_db", "")) in {"scopus", "openalex"},
+            "search_group_valid": normalize_lower(row.get("search_group", "")) in {"core", "exploratory_1", "exploratory_2"},
+        })
+
+    return checks, rows
+
+
+def validate_screening_records(deduplicated_df: pd.DataFrame, screening_df: pd.DataFrame, stage_name: str) -> Tuple[List[ValidationCheck], List[dict]]:
+    checks: List[ValidationCheck] = []
+    rows: List[dict] = []
+    stage = stage_name
+
+    if screening_df.empty:
+        checks.append(_fail("V27", stage, "screening_generated", "critical", "Rows > 0", "0", "screening_matrix.csv", "Regenerar screening matrix"))
+        return checks, rows
+
+    checks.append(_pass("V27", stage, "screening_generated", "Rows > 0", str(len(screening_df)), "screening_matrix.csv"))
+
+    if len(screening_df) == len(deduplicated_df):
+        checks.append(_pass("V28", stage, "screening_matches_deduplicated_rows", "Same number of rows", str(len(screening_df)), "screening_matrix.csv"))
+    else:
+        checks.append(_fail("V28", stage, "screening_matches_deduplicated_rows", "critical", "Same number of rows", f"{len(screening_df)} vs {len(deduplicated_df)}", "screening_matrix.csv", "Regenerar o realinear screening matrix"))
+
+    dedup_ids = set(deduplicated_df["record_id"].astype(str)) if not deduplicated_df.empty and "record_id" in deduplicated_df.columns else set()
+    screening_ids = set(screening_df["record_id"].astype(str)) if "record_id" in screening_df.columns else set()
+
+    if dedup_ids == screening_ids:
+        checks.append(_pass("V38", stage, "screening_ids_match_deduplicated", "Same record_id set", "Match", "screening_matrix.csv"))
+    else:
+        checks.append(_fail("V38", stage, "screening_ids_match_deduplicated", "critical", "Same record_id set", f"dedup={len(dedup_ids)} screening={len(screening_ids)}", "screening_matrix.csv", "Reindexar screening"))
+
+
+
+
+    if "record_id" in screening_df.columns and screening_df["record_id"].astype(str).duplicated().sum() == 0:
+        checks.append(_pass("V39", stage, "screening_record_id_unique", "No duplicated record_id", "No duplicates", "screening_matrix.csv"))
+    else:
+        dup_count = int(screening_df["record_id"].astype(str).duplicated().sum()) if "record_id" in screening_df.columns else -1
+        checks.append(_fail("V39", stage, "screening_record_id_unique", "high", "No duplicated record_id", str(dup_count), "screening_matrix.csv", "Depurar screening matrix"))
+
+    for _, row in screening_df.iterrows():
+        rows.append({
+            "record_id": row.get("record_id", ""),
+            "has_record_id": bool(normalize_text(row.get("record_id", ""))),
+            "has_title": bool(normalize_text(row.get("title", ""))),
+            "title_abstract_status_valid": normalize_lower(row.get("screen_title_abstract", "")) in {"pending", "include", "exclude"},
+            "retrieval_status_valid": normalize_lower(row.get("retrieval_status", "")) in {"pending", "retrieved", "not_retrieved"},
+            "full_text_status_valid": normalize_lower(row.get("screen_full_text", "")) in {"pending", "include", "exclude"},
+            "include_final_valid": normalize_lower(row.get("include_final", "")) in {"pending", "yes", "no"},
+        })
+
+    return checks, rows
+
+
+def validate_quality_profile(profile: dict, stage_name: str) -> List[ValidationCheck]:
+    stage = stage_name
+    checks: List[ValidationCheck] = []
+
+    doi = float(profile.get("doi_coverage_pct", 0.0))
+    abstract = float(profile.get("abstract_coverage_pct", 0.0))
+
+    if 0 <= doi <= 100:
+        checks.append(_pass("V48", stage, "doi_coverage_range", "0-100", str(doi), "quality_profile.json"))
+    else:
+        checks.append(_fail("V48", stage, "doi_coverage_range", "high", "0-100", str(doi), "quality_profile.json", "Revisar cálculo DOI coverage"))
+
+    if 0 <= abstract <= 100:
+        checks.append(_pass("V49", stage, "abstract_coverage_range", "0-100", str(abstract), "quality_profile.json"))
+    else:
+        checks.append(_fail("V49", stage, "abstract_coverage_range", "high", "0-100", str(abstract), "quality_profile.json", "Revisar cálculo abstract coverage"))
+
+    return checks
+
+
+def validate_prisma_stats_report(stats: "PipelineStats", harmonized_df: pd.DataFrame, deduplicated_df: pd.DataFrame, stage_name: str) -> List[ValidationCheck]:
+    stage = stage_name
+    checks: List[ValidationCheck] = []
+
+    if stats.records_identified_total == len(harmonized_df):
+        checks.append(_pass("V30", stage, "identified_matches_harmonized", "identified == harmonized_rows", str(stats.records_identified_total), "prisma_counts.json"))
+    else:
+        checks.append(_fail("V30", stage, "identified_matches_harmonized", "critical", "identified == harmonized_rows", f"{stats.records_identified_total} vs {len(harmonized_df)}", "prisma_counts.json", "Revisar cómputo PRISMA"))
+
+    if stats.records_after_deduplication == len(deduplicated_df):
+        checks.append(_pass("V31", stage, "deduplicated_matches_rows", "records_after_deduplication == deduplicated_rows", str(stats.records_after_deduplication), "prisma_counts.json"))
+    else:
+        checks.append(_fail("V31", stage, "deduplicated_matches_rows", "critical", "records_after_deduplication == deduplicated_rows", f"{stats.records_after_deduplication} vs {len(deduplicated_df)}", "prisma_counts.json", "Revisar cómputo PRISMA"))
+
+    if stats.records_screened_title_abstract == stats.records_after_deduplication:
+        checks.append(_pass("V40", stage, "screened_equals_after_dedup", "screened == after_deduplication", str(stats.records_screened_title_abstract), "prisma_counts.json"))
+    else:
+        checks.append(_fail("V40", stage, "screened_equals_after_dedup", "critical", "screened == after_deduplication", f"{stats.records_screened_title_abstract} vs {stats.records_after_deduplication}", "prisma_counts.json", "Revisar screening"))
+
+    if stats.records_excluded_title_abstract is None or (stats.records_screened_title_abstract is not None and stats.records_excluded_title_abstract <= stats.records_screened_title_abstract):
+        checks.append(_pass("V41", stage, "excluded_title_abstract_le_screened", "<= screened", str(stats.records_excluded_title_abstract), "prisma_counts.json"))
+    else:
+        checks.append(_fail("V41", stage, "excluded_title_abstract_le_screened", "critical", "<= screened", str(stats.records_excluded_title_abstract), "prisma_counts.json", "Revisar exclusiones"))
+
+    if (
+        stats.studies_included_review is None
+        or stats.reports_assessed_for_eligibility is None
+        or stats.studies_included_review <= stats.reports_assessed_for_eligibility
+    ):
+        checks.append(
+            _pass(
+                "V58",
+                stage,
+                "included_le_assessed",
+                "<= assessed_for_eligibility",
+                str(stats.studies_included_review),
+                "prisma_counts.json",
+            )
+        )
+    else:
+        checks.append(
+            _fail(
+                "V58",
+                stage,
+                "included_le_assessed",
+                "critical",
+                "<= assessed_for_eligibility",
+                str(stats.studies_included_review),
+                "prisma_counts.json",
+                "Revisar PRISMA final",
+            )
+        )
+
+    return checks
+
+
+# =========================================================
+# Data model
+# =========================================================
+
+@dataclass
+class PipelineStats:
+    records_identified_total: int = 0
+    records_scopus_core: int = 0
+    records_scopus_exploratory: int = 0
+    records_openalex: int = 0
+
+    duplicates_removed: int = 0
+    records_after_deduplication: int = 0
+
+    records_screened_title_abstract: Optional[int] = None
+    records_excluded_title_abstract: Optional[int] = None
+
+    reports_sought_for_retrieval: Optional[int] = None
+    reports_not_retrieved: Optional[int] = None
+
+    reports_assessed_for_eligibility: Optional[int] = None
+    reports_excluded_full_text: Optional[int] = None
+
+    studies_included_review: Optional[int] = None
+    reports_included_review: Optional[int] = None
+
+    doi_coverage_pct: float = 0.0
+    abstract_coverage_pct: float = 0.0
+    year_min: Optional[int] = None
+    year_max: Optional[int] = None
+
+
+    # =========================================================
+    # State / protocol
+    # =========================================================
+
+def load_pipeline_state() -> dict:
+    return read_json(
+        get_state_path(),
+        default={"completed_stages": [], "artifacts": {}, "stats": {}, "sources": {}},
+    )
+
+
+def save_pipeline_state(state: dict) -> None:
+    write_json(get_state_path(), state)
+
+
+def mark_stage_completed(stage_name: str, state: Optional[dict] = None) -> dict:
+    state = load_pipeline_state() if state is None else state
+    completed = set(state.get("completed_stages", []))
+    completed.add(stage_name)
+    state["completed_stages"] = sorted(completed)
+    save_pipeline_state(state)
+    return state
+
+
+def save_protocol(protocol: dict) -> Path:
+    path = get_protocol_path()
+    write_json(path, protocol)
+    return path
+
+
+
+def clear_statistical_data() -> None:
+    processed_dir = get_processed_dir()
+    state = load_pipeline_state()
+
+    artifact_keys_to_remove = [
+        "harmonized_records_csv",
+        "deduplicated_records_csv",
+        "deduplication_groups_csv",
+        "screening_matrix_csv",
+        "quality_profile_json",
+        "prisma_counts_json",
+        "prisma_diagram_png",
+        "prisma_diagram_svg",
+        "manuscript_tables_md",
+        "records_sqlite",
+        "manifest_json",
+        "source_manifest_json",
+        "search_summary_json",
+        "audit_trail_jsonl",
+        "run_log_jsonl",
+        "reproducibility_package_zip",
+        "validation_report_stage_1_pico_json",
+        "validation_report_stage_1_pico_csv",
+        "validation_report_stage_1_pico_md",
+        "validation_report_stage_2_search_json",
+        "validation_report_stage_2_search_csv",
+        "validation_report_stage_2_search_md",
+        "validation_report_stage_3_screening_json",
+        "validation_report_stage_3_screening_csv",
+        "validation_report_stage_3_screening_md",
+        "validation_report_stage_5_quality_json",
+        "validation_report_stage_5_quality_csv",
+        "validation_report_stage_5_quality_md",
+        "validation_report_stage_6_synthesis_json",
+        "validation_report_stage_6_synthesis_csv",
+        "validation_report_stage_6_synthesis_md",
+        "validation_report_stage_7_prisma_json",
+        "validation_report_stage_7_prisma_csv",
+        "validation_report_stage_7_prisma_md",
+        "validation_history_jsonl",
+        "record_validation_harmonized_stage_2_search_csv",
+        "record_validation_deduplicated_stage_2_search_csv",
+        "record_validation_screening_stage_2_search_csv",
+        "record_validation_screening_stage_3_screening_csv",
+    ]
+
+    for key in artifact_keys_to_remove:
+        raw_path = state.get("artifacts", {}).get(key)
+        if raw_path:
+            path = Path(raw_path)
+            if path.exists():
+                try:
+                    path.unlink()
+                except IsADirectoryError:
+                    pass
+
+    optional_files = list(processed_dir.glob("validation_report_*.json")) + list(processed_dir.glob("validation_report_*.csv")) + list(processed_dir.glob("validation_report_*.md"))
+    optional_files += list(processed_dir.glob("record_validation_*.csv"))
+    optional_files += [
+        processed_dir / "harmonized_records.csv",
+        processed_dir / "deduplicated_records.csv",
+        processed_dir / "deduplication_groups.csv",
+        processed_dir / "screening_matrix.csv",
+        processed_dir / "quality_profile.json",
+        processed_dir / "prisma_counts.json",
+        processed_dir / "prisma_diagram.png",
+        processed_dir / "prisma_diagram.svg",
+        processed_dir / "manuscript_tables.md",
+        processed_dir / "records.sqlite",
+        processed_dir / "manifest.json",
+        processed_dir / "source_manifest.json",
+        processed_dir / "search_summary.json",
+        processed_dir / "reproducibility_package.zip",
+        processed_dir / "audit_trail.jsonl",
+        processed_dir / "run_log.jsonl",
+        processed_dir / "validation_history.jsonl",
+    ]
+   
+    for path in optional_files:
+        if path.exists():
+            path.unlink()
+
+    state["stats"] = {}
+    state["sources"] = {}
+    state["artifacts"] = {
+        key: value
+        for key, value in state.get("artifacts", {}).items()
+        if key not in artifact_keys_to_remove
+    }
+    state["completed_stages"] = [
+        stage
+        for stage in state.get("completed_stages", [])
+        if stage == "stage_1_pico"
+    ]
+    save_pipeline_state(state)
+    
+
+# =========================================================
+# Source loading
+# =========================================================
+
+SCOPUS_REQUIRED_COLUMNS = ["Title"]
+
+
+def load_scopus_csv(csv_path: Path, source_label: str, search_group: str) -> pd.DataFrame:
+  if not csv_path.exists():
+      raise RuntimeError(f"No existe el archivo de Scopus: {csv_path}")
+
+  df = None
+  for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+      try:
+          df = pd.read_csv(csv_path, encoding=encoding)
+          break
+      except Exception:
+          df = None
+
+  if df is None:
+      raise RuntimeError(f"No se pudo leer el CSV de Scopus: {csv_path}")
+
+  ensure_required_columns(df, SCOPUS_REQUIRED_COLUMNS, f"Scopus {search_group}")
+  df["source_db"] = source_label
+  df["search_group"] = search_group
+  df["raw_source_file"] = str(csv_path)
+  return df
+
+def load_openalex_csv(csv_path: Optional[str], search_group: str) -> pd.DataFrame:
+    if not csv_path:
+        return pd.DataFrame()
+    path = Path(csv_path)
+    if not path.exists():
+        raise RuntimeError(f"No existe el CSV de OpenAlex para {search_group}: {csv_path}")
+
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    df["source_db"] = "openalex"
+    df["search_group"] = search_group
+    df["raw_source_file"] = str(path)
+    return df
+
+
+# =========================================================
+# Harmonization
+# =========================================================
+
+def harmonized_columns() -> List[str]:
+    return [
+        "record_id",
+        "source_db",
+        "search_group",
+        "title",
+        "title_norm",
+        "authors",
+        "authors_norm",
+        "year",
+        "journal",
+        "abstract",
+        "abstract_present",
+        "keywords",
+        "doi",
+        "doi_norm",
+        "document_type",
+        "language",
+        "affiliations",
+        "citations",
+        "openalex_id",
+        "raw_source_file",
+    ]
+
+
+def harmonize_scopus(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=harmonized_columns())
+
+    rows = []
+    for _, row in df.iterrows():
+        title = first_non_empty(row, ["Title"])
+        authors = first_non_empty(row, ["Authors", "Author full names", "Author(s)"])
+        abstract = first_non_empty(row, ["Abstract"])
+        doi = normalize_lower(first_non_empty(row, ["DOI"]))
+        journal = first_non_empty(row, ["Source title"])
+
+        try:
+            year_val = first_non_empty(row, ["Year"])
+            year = int(float(year_val)) if year_val else None
+        except Exception:
+            year = None
+
+        try:
+            cited_val = first_non_empty(row, ["Cited by"])
+            citations = int(float(cited_val)) if cited_val else 0
+        except Exception:
+            citations = 0
+
+        auth_kw = first_non_empty(row, ["Author Keywords"])
+        idx_kw = first_non_empty(row, ["Index Keywords"])
+        keywords = " | ".join([x for x in [auth_kw, idx_kw] if x])
+
+        rows.append({
+            "record_id": "",
+            "source_db": normalize_text(row.get("source_db", "scopus")),
+            "search_group": normalize_text(row.get("search_group", "")),
+            "title": title,
+            "title_norm": normalize_lower(title),
+            "authors": authors,
+            "authors_norm": normalize_lower(authors),
+            "year": year,
+            "journal": journal,
+            "abstract": abstract,
+            "abstract_present": bool(normalize_text(abstract)),
+            "keywords": keywords,
+            "doi": doi,
+            "doi_norm": doi,
+            "document_type": normalize_lower(first_non_empty(row, ["Document Type"])),
+            "language": normalize_lower(first_non_empty(row, ["Language of Original Document", "Language"])),
+            "affiliations": first_non_empty(row, ["Affiliations"]),
+            "citations": citations,
+            "openalex_id": "",
+            "raw_source_file": normalize_text(row.get("raw_source_file", "")),
+        })
+
+    out = pd.DataFrame(rows)
+    out["record_id"] = [f"REC-{i+1:06d}" for i in range(len(out))]
+    return out[harmonized_columns()]
+
+
+
+def harmonize_openalex(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=harmonized_columns())
+
+    rows = []
+    for _, row in df.iterrows():
+        title = normalize_text(row.get("title", ""))
+        doi = normalize_lower(row.get("doi", ""))
+        abstract_present = bool(row.get("abstract_inverted_index_present", False))
+
+        try:
+            year = int(float(row.get("publication_year"))) if pd.notna(row.get("publication_year")) else None
+        except Exception:
+            year = None
+
+        rows.append({
+            "record_id": "",
+            "source_db": normalize_text(row.get("source_db", "openalex")),
+            "search_group": normalize_text(row.get("search_group", "openalex")),
+            "title": title,
+            "title_norm": normalize_lower(title),
+            "authors": normalize_text(row.get("authors", "")),
+            "authors_norm": normalize_lower(row.get("authors", "")),
+            "year": year,
+            "journal": normalize_text(row.get("source_display_name", "")),
+            "abstract": "",
+            "abstract_present": abstract_present,
+            "keywords": normalize_text(row.get("keywords", "")),
+            "doi": doi,
+            "doi_norm": doi,
+            "document_type": normalize_lower(row.get("type", "")),
+            "language": normalize_lower(row.get("language", "")),
+            "affiliations": normalize_text(row.get("institutions", "")),
+            "citations": int(row.get("cited_by_count", 0)) if pd.notna(row.get("cited_by_count")) else 0,
+            "openalex_id": normalize_text(row.get("id", "")),
+            "raw_source_file": normalize_text(row.get("raw_source_file", "")),
+        })
+
+    out = pd.DataFrame(rows)
+    out["record_id"] = [f"REC-{i+1:06d}" for i in range(len(out))]
+    return out[harmonized_columns()]
+
+
+def harmonize_sources(
+    scopus_core_df: pd.DataFrame,
+    scopus_exploratory_1_df: pd.DataFrame,
+    scopus_exploratory_2_df: pd.DataFrame,
+    openalex_core_df: pd.DataFrame,
+    openalex_exploratory_1_df: pd.DataFrame,
+    openalex_exploratory_2_df: pd.DataFrame,
+) -> pd.DataFrame:
+    parts: List[pd.DataFrame] = []
+
+    if not scopus_core_df.empty:
+        parts.append(harmonize_scopus(scopus_core_df))
+    if not scopus_exploratory_1_df.empty:
+        parts.append(harmonize_scopus(scopus_exploratory_1_df))
+    if not scopus_exploratory_2_df.empty:
+        parts.append(harmonize_scopus(scopus_exploratory_2_df))
+
+    if not openalex_core_df.empty:
+        parts.append(harmonize_openalex(openalex_core_df))
+    if not openalex_exploratory_1_df.empty:
+        parts.append(harmonize_openalex(openalex_exploratory_1_df))
+    if not openalex_exploratory_2_df.empty:
+        parts.append(harmonize_openalex(openalex_exploratory_2_df))
+
+    if not parts:
+        return pd.DataFrame(columns=harmonized_columns())
+
+    out = pd.concat(parts, ignore_index=True)
+    out["record_id"] = [f"REC-{i+1:06d}" for i in range(len(out))]
+    return out[harmonized_columns()]
+
+
+
+#=========================================================
+# Deduplication
+# =========================================================
+
+def build_dedup_key(row: pd.Series) -> str:
+    doi = normalize_lower(row.get("doi_norm", ""))
+    title = normalize_lower(row.get("title_norm", ""))
+    year = normalize_text(row.get("year", ""))
+    authors = normalize_lower(row.get("authors_norm", ""))
+
+    if doi:
+        return f"doi::{doi}"
+    if title and year:
+        return f"title_year::{title}::{year}"
+    return f"title_authors::{title}::{authors}"
+
+
+def source_priority(source_db: str, search_group: str) -> int:
+    source_db = normalize_lower(source_db)
+    search_group = normalize_lower(search_group)
+
+    if source_db == "scopus" and search_group == "core":
+        return 1
+    if source_db == "openalex" and search_group == "core":
+        return 2
+    if source_db == "scopus" and search_group == "exploratory_1":
+        return 3
+    if source_db == "scopus" and search_group == "exploratory_2":
+        return 4
+    if source_db == "openalex" and search_group == "exploratory_1":
+        return 5
+    if source_db == "openalex" and search_group == "exploratory_2":
+        return 6
+    return 9
+
+
+def deduplicate_records(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty:
+        return df.copy(), pd.DataFrame(columns=["dedup_key", "n_records", "record_ids", "sources"])
+
+    work = df.copy()
+    work["dedup_key"] = work.apply(build_dedup_key, axis=1)
+    work["priority"] = work.apply(lambda r: source_priority(r["source_db"], r["search_group"]), axis=1)
+    work["title_len"] = safe_series(work, "title").astype(str).str.len()
+
+    work = work.sort_values(
+        by=["priority", "abstract_present", "doi_norm", "title_len"],
+        ascending=[True, False, False, False],
+    )
+
+    dedup_groups = (
+        work.groupby("dedup_key", dropna=False)
+        .agg(
+            n_records=("record_id", "count"),
+            record_ids=("record_id", lambda x: " | ".join(x.astype(str))),
+            sources=("source_db", lambda x: " | ".join(sorted(set(x.astype(str))))),
+        )
+        .reset_index()
+    )
+
+    deduplicated = work.drop_duplicates(subset=["dedup_key"], keep="first").copy()
+    deduplicated = deduplicated.drop(columns=["priority", "title_len"])
+    deduplicated = deduplicated.reset_index(drop=True)
+
+    return deduplicated, dedup_groups
+
+
+# =========================================================
+# Screening matrix
+# =========================================================
+
+def build_screening_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "record_id", "title", "year", "source_db", "search_group", "doi",
+        "screen_title_abstract", "reason_title_abstract",
+        "retrieve_full_text", "retrieval_status",
+        "screen_full_text", "reason_full_text",
+        "include_final", "study_id", "notes",
+    ]
+
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    screening = df[["record_id", "title", "year", "source_db", "search_group", "doi"]].copy()
+    screening["screen_title_abstract"] = "pending"
+    screening["reason_title_abstract"] = ""
+    screening["retrieve_full_text"] = "pending"
+    screening["retrieval_status"] = "pending"
+    screening["screen_full_text"] = "pending"
+    screening["reason_full_text"] = ""
+    screening["include_final"] = "pending"
+    screening["study_id"] = ""
+    screening["notes"] = ""
+    return screening[cols]
+
+
+# =========================================================
+# PRISMA computation and validation
+# =========================================================
+
+def compute_prisma_counts(harmonized_df: pd.DataFrame, deduplicated_df: pd.DataFrame, screening_df: pd.DataFrame) -> PipelineStats:
+    stats = PipelineStats()
+
+    stats.records_identified_total = len(harmonized_df)
+    stats.records_scopus_core = int(((harmonized_df["source_db"] == "scopus") & (harmonized_df["search_group"] == "core")).sum()) if "search_group" in harmonized_df.columns else 0
+    stats.records_scopus_exploratory = int(((harmonized_df["source_db"] == "scopus") & (harmonized_df["search_group"].isin(["exploratory_1", "exploratory_2"]))).sum()) if "search_group" in harmonized_df.columns else 0
+    stats.records_openalex = int((harmonized_df["source_db"] == "openalex").sum()) if "source_db" in harmonized_df.columns else 0
+
+    stats.records_after_deduplication = len(deduplicated_df)
+    stats.duplicates_removed = stats.records_identified_total - stats.records_after_deduplication
+
+    if not screening_df.empty:
+        stats.records_screened_title_abstract = len(screening_df)
+
+        sta = screening_df["screen_title_abstract"].astype(str).str.lower().str.strip()
+        retrieve = screening_df["retrieve_full_text"].astype(str).str.lower().str.strip()
+        retrieval = screening_df["retrieval_status"].astype(str).str.lower().str.strip()
+        fulltext = screening_df["screen_full_text"].astype(str).str.lower().str.strip()
+        final_inc = screening_df["include_final"].astype(str).str.lower().str.strip()
+
+        if (sta != "pending").any():
+            stats.records_excluded_title_abstract = int((sta == "exclude").sum())
+            stats.reports_sought_for_retrieval = int((sta == "include").sum())
+
+        if (retrieve != "pending").any():
+            stats.reports_sought_for_retrieval = int((retrieve == "yes").sum())
+
+        if (retrieval != "pending").any():
+            stats.reports_not_retrieved = int((retrieval == "not_retrieved").sum())
+            retrieved_count = int((retrieval == "retrieved").sum())
+            stats.reports_assessed_for_eligibility = retrieved_count
+
+        if (fulltext != "pending").any():
+            stats.reports_assessed_for_eligibility = int((fulltext.isin(["include", "exclude"])).sum())
+            stats.reports_excluded_full_text = int((fulltext == "exclude").sum())
+
+        if (final_inc != "pending").any():
+            stats.studies_included_review = int((final_inc == "yes").sum())
+            stats.reports_included_review = stats.studies_included_review
+
+    if not deduplicated_df.empty:
+        stats.doi_coverage_pct = round(
+            (deduplicated_df["doi"].astype(str).str.strip().ne("").sum() / len(deduplicated_df)) * 100,
+            2,
+        ) if "doi" in deduplicated_df.columns else 0.0
+
+        stats.abstract_coverage_pct = round(
+            (deduplicated_df["abstract_present"].fillna(False).astype(bool).sum() / len(deduplicated_df)) * 100,
+            2,
+        ) if "abstract_present" in deduplicated_df.columns else 0.0
+
+        years = pd.to_numeric(deduplicated_df["year"], errors="coerce").dropna()
+        if not years.empty:
+            stats.year_min = int(years.min())
+            stats.year_max = int(years.max())
+
+    validate_prisma_stats(stats)
+    return stats
+
+
+def validate_prisma_stats(stats: PipelineStats) -> None:
+    if stats.records_identified_total < 0:
+        raise RuntimeError("PRISMA inválido: records_identified_total < 0.")
+
+    if stats.records_after_deduplication < 0:
+        raise RuntimeError("PRISMA inválido: records_after_deduplication < 0.")
+
+    if stats.duplicates_removed != (stats.records_identified_total - stats.records_after_deduplication):
+        raise RuntimeError("PRISMA inválido: duplicates_removed no coincide con identified - deduplicated.")
+
+    if stats.records_after_deduplication > stats.records_identified_total:
+        raise RuntimeError("PRISMA inválido: records_after_deduplication > records_identified_total.")
+
+    if stats.records_screened_title_abstract is not None:
+        if stats.records_screened_title_abstract != stats.records_after_deduplication:
+            raise RuntimeError("PRISMA inválido: records_screened_title_abstract debe coincidir con records_after_deduplication.")
+
+    if stats.records_excluded_title_abstract is not None and stats.records_screened_title_abstract is not None:
+        if stats.records_excluded_title_abstract > stats.records_screened_title_abstract:
+            raise RuntimeError("PRISMA inválido: records_excluded_title_abstract > records_screened_title_abstract.")
+
+    if stats.reports_sought_for_retrieval is not None and stats.records_screened_title_abstract is not None and stats.records_excluded_title_abstract is not None:
+        expected_upper = stats.records_screened_title_abstract - stats.records_excluded_title_abstract
+        if stats.reports_sought_for_retrieval > expected_upper:
+            raise RuntimeError("PRISMA inválido: reports_sought_for_retrieval excede los registros incluidos tras screening.")
+
+    if stats.reports_not_retrieved is not None and stats.reports_sought_for_retrieval is not None:
+        if stats.reports_not_retrieved > stats.reports_sought_for_retrieval:
+            raise RuntimeError("PRISMA inválido: reports_not_retrieved > reports_sought_for_retrieval.")
+
+    if stats.reports_assessed_for_eligibility is not None and stats.reports_sought_for_retrieval is not None and stats.reports_not_retrieved is not None:
+        expected_upper = stats.reports_sought_for_retrieval - stats.reports_not_retrieved
+        if stats.reports_assessed_for_eligibility > expected_upper:
+            raise RuntimeError("PRISMA inválido: reports_assessed_for_eligibility excede los reports recuperados.")
+
+    if stats.reports_excluded_full_text is not None and stats.reports_assessed_for_eligibility is not None:
+        if stats.reports_excluded_full_text > stats.reports_assessed_for_eligibility:
+            raise RuntimeError("PRISMA inválido: reports_excluded_full_text > reports_assessed_for_eligibility.")
+
+    if stats.studies_included_review is not None and stats.reports_assessed_for_eligibility is not None and stats.reports_excluded_full_text is not None:
+        expected_upper = stats.reports_assessed_for_eligibility - stats.reports_excluded_full_text
+        if stats.studies_included_review > expected_upper:
+            raise RuntimeError("PRISMA inválido: studies_included_review excede reports elegibles tras full text.")
+
+
+def build_quality_profile(deduplicated_df: pd.DataFrame) -> dict:
+    if deduplicated_df.empty:
+        return {
+            "n_records": 0,
+            "doi_coverage_pct": 0.0,
+            "abstract_coverage_pct": 0.0,
+            "language_distribution": {},
+            "document_type_distribution": {},
+        }
+
+    lang_dist = (
+        deduplicated_df["language"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "unknown")
+        .value_counts()
+        .to_dict()
+        if "language" in deduplicated_df.columns
+        else {}
+    )
+
+    doc_type_dist = (
+        deduplicated_df["document_type"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "unknown")
+        .value_counts()
+        .to_dict()
+        if "document_type" in deduplicated_df.columns
+        else {}
+    )
+
+    return {
+        "n_records": len(deduplicated_df),
+        "doi_coverage_pct": round(
+            (deduplicated_df["doi"].astype(str).str.strip().ne("").sum() / len(deduplicated_df)) * 100,
+            2,
+        ) if "doi" in deduplicated_df.columns else 0.0,
+        "abstract_coverage_pct": round(
+            (deduplicated_df["abstract_present"].fillna(False).astype(bool).sum() / len(deduplicated_df)) * 100,
+            2,
+        ) if "abstract_present" in deduplicated_df.columns else 0.0,
+        "language_distribution": lang_dist,
+        "document_type_distribution": doc_type_dist,
+    }
+
+
+
+# =========================================================
+# PRISMA diagram
+# =========================================================
+
+def generate_prisma_diagram(stats: PipelineStats) -> Tuple[Path, Path]:
+    processed_dir = get_processed_dir()
+    png_path = processed_dir / "prisma_diagram.png"
+    svg_path = processed_dir / "prisma_diagram.svg"
+
+    fig, ax = plt.subplots(figsize=(10.5, 13))
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 13)
+    ax.axis("off")
+
+    def box(x, y, w, h, text, fontsize=10):
+        rect = plt.Rectangle((x, y), w, h, fill=False, linewidth=1.2)
+        ax.add_patch(rect)
+        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=fontsize, wrap=True)
+
+    def arrow(x1, y1, x2, y2):
+        ax.annotate("", xy=(x2, y2), xytext=(x1, y1), arrowprops=dict(arrowstyle="->", lw=1.2))
+
+    side_labels = [
+        (0.3, 10.8, "Identification"),
+        (0.3, 8.0, "Screening"),
+        (0.3, 5.0, "Eligibility"),
+        (0.3, 2.0, "Included"),
+    ]
+    for x, y, label in side_labels:
+        rect = plt.Rectangle((x, y), 0.5, 1.5, fill=False, linewidth=1.0)
+        ax.add_patch(rect)
+        ax.text(x + 0.25, y + 0.75, label, ha="center", va="center", rotation=90, fontsize=9)
+
+    identified_text = (
+        "Records identified from:\n"
+        f"- Scopus core (n = {stats.records_scopus_core})\n"
+        f"- Scopus exploratory (n = {stats.records_scopus_exploratory})\n"
+        f"- OpenAlex (n = {stats.records_openalex})\n"
+        f"Total (N = {stats.records_identified_total})"
+    )
+
+    box(2.0, 11.2, 3.5, 1.2, identified_text, fontsize=9.5)
+    box(2.0, 9.5, 3.5, 1.0, f"Records after deduplication\nN = {stats.records_after_deduplication}")
+    box(6.2, 9.5, 2.6, 1.0, f"Duplicates removed\nN = {stats.duplicates_removed}")
+
+    box(2.0, 7.8, 3.5, 1.0, f"Records screened\nN = {display_value(stats.records_screened_title_abstract)}")
+    box(6.2, 7.8, 2.6, 1.0, f"Records excluded\nN = {display_value(stats.records_excluded_title_abstract)}")
+
+    box(2.0, 6.1, 3.5, 1.0, f"Reports sought for retrieval\nN = {display_value(stats.reports_sought_for_retrieval)}")
+    box(6.2, 6.1, 2.6, 1.0, f"Reports not retrieved\nN = {display_value(stats.reports_not_retrieved)}")
+
+    box(2.0, 4.4, 3.5, 1.0, f"Reports assessed for eligibility\nN = {display_value(stats.reports_assessed_for_eligibility)}")
+    box(6.2, 4.2, 2.6, 1.4, f"Reports excluded\nN = {display_value(stats.reports_excluded_full_text)}")
+
+    box(2.0, 2.2, 3.5, 1.0, f"Studies included in review\nN = {display_value(stats.studies_included_review)}")
+    box(6.2, 2.2, 2.6, 1.0, f"Reports included\nN = {display_value(stats.reports_included_review)}")
+
+    arrow(3.75, 11.2, 3.75, 10.5)
+    arrow(5.5, 10.0, 6.2, 10.0)
+    arrow(3.75, 9.5, 3.75, 8.8)
+    arrow(5.5, 8.3, 6.2, 8.3)
+    arrow(3.75, 7.8, 3.75, 7.1)
+    arrow(5.5, 6.6, 6.2, 6.6)
+    arrow(3.75, 6.1, 3.75, 5.4)
+    arrow(5.5, 4.9, 6.2, 4.9)
+    arrow(3.75, 4.4, 3.75, 3.2)
+    arrow(5.5, 2.7, 6.2, 2.7)
+
+    plt.tight_layout()
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    fig.savefig(svg_path, bbox_inches="tight")
+    plt.close(fig)
+
+    return png_path, svg_path
+
+
+
+# =========================================================
+# Manuscript tables / Exports / Helpers
+# =========================================================
+
+def generate_manuscript_tables(harmonized_df: pd.DataFrame, deduplicated_df: pd.DataFrame, screening_df: pd.DataFrame, stats: PipelineStats) -> str:
+    source_summary = []
+    if not harmonized_df.empty:
+        src = (
+            harmonized_df.groupby(["source_db", "search_group"])
+            .size()
+            .reset_index(name="n")
+            .sort_values(["source_db", "search_group"])
+        )
+        source_summary = src.to_dict(orient="records")
+
+    year_summary_md = "No available data."
+    if not deduplicated_df.empty and "year" in deduplicated_df.columns:
+        years = (
+            deduplicated_df.dropna(subset=["year"])
+            .groupby("year")
+            .size()
+            .reset_index(name="n")
+            .sort_values("year")
+        )
+        if not years.empty:
+            year_summary_md = dataframe_to_md_or_text(years)
+
+    top_journals_md = "No available data."
+    if not deduplicated_df.empty and "journal" in deduplicated_df.columns:
+        journals = (
+            deduplicated_df[deduplicated_df["journal"].astype(str).str.strip() != ""]
+            .groupby("journal")
+            .size()
+            .reset_index(name="n")
+            .sort_values("n", ascending=False)
+            .head(15)
+        )
+        if not journals.empty:
+            top_journals_md = dataframe_to_md_or_text(journals)
+
+    prisma_table = pd.DataFrame([
+        ["Records identified from Scopus core", stats.records_scopus_core],
+        ["Records identified from Scopus exploratory", stats.records_scopus_exploratory],
+        ["Records identified from OpenAlex", stats.records_openalex],
+        ["Total records identified", stats.records_identified_total],
+        ["Duplicates removed", stats.duplicates_removed],
+        ["Records screened", display_value(stats.records_screened_title_abstract)],
+        ["Records excluded (title/abstract)", display_value(stats.records_excluded_title_abstract)],
+        ["Reports sought for retrieval", display_value(stats.reports_sought_for_retrieval)],
+        ["Reports not retrieved", display_value(stats.reports_not_retrieved)],
+        ["Reports assessed for eligibility", display_value(stats.reports_assessed_for_eligibility)],
+        ["Reports excluded (full text)", display_value(stats.reports_excluded_full_text)],
+        ["Studies included in review", display_value(stats.studies_included_review)],
+    ], columns=["Stage", "N"])
+
+    source_table_md = dataframe_to_md_or_text(pd.DataFrame(source_summary)) if source_summary else "No available data."
+    prisma_table_md = dataframe_to_md_or_text(prisma_table)
+
+    md = f"""# Manuscript Tables
+
+## Table 1. Source identification summary
+
+{source_table_md}
+
+## Table 2. PRISMA counts
+
+{prisma_table_md}
+
+## Table 3. Publication years in deduplicated corpus
+
+{year_summary_md}
+
+## Table 4. Top journals/sources
+
+{top_journals_md}
+"""
+    return md
+
+
+def save_sqlite(harmonized_df: pd.DataFrame, deduplicated_df: pd.DataFrame, screening_df: pd.DataFrame) -> Path:
+    db_path = get_processed_dir() / "records.sqlite"
+    conn = sqlite3.connect(db_path)
+
+    harmonized_df.to_sql("harmonized_records", conn, if_exists="replace", index=False)
+    deduplicated_df.to_sql("deduplicated_records", conn, if_exists="replace", index=False)
+    screening_df.to_sql("screening_matrix", conn, if_exists="replace", index=False)
+
+    conn.close()
+    return db_path
+
+
+def save_manifest(paths: List[Path]) -> Path:
+    manifest = {"generated_at": now_iso(), "files": []}
+    for path in paths:
+        if path.exists():
+            manifest["files"].append({
+                "path": str(path),
+                "sha256": file_sha256(path),
+                "size_bytes": path.stat().st_size,
+            })
+
+    manifest_path = get_processed_dir() / "manifest.json"
+    write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def create_reproducibility_package(paths: List[Path]) -> Path:
+    zip_path = get_processed_dir() / "reproducibility_package.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in paths:
+            if path.exists():
+                zf.write(path, arcname=path.name)
+    return zip_path
+
+
+def _important_stats(stats: PipelineStats) -> dict:
+    return {
+        "records_identified_total": stats.records_identified_total,
+        "duplicates_removed": stats.duplicates_removed,
+        "records_after_deduplication": stats.records_after_deduplication,
+        "records_screened_title_abstract": stats.records_screened_title_abstract,
+        "records_excluded_title_abstract": stats.records_excluded_title_abstract,
+        "reports_sought_for_retrieval": stats.reports_sought_for_retrieval,
+        "reports_not_retrieved": stats.reports_not_retrieved,
+        "reports_assessed_for_eligibility": stats.reports_assessed_for_eligibility,
+        "reports_excluded_full_text": stats.reports_excluded_full_text,
+        "studies_included_review": stats.studies_included_review,
+        "doi_coverage_pct": stats.doi_coverage_pct,
+        "abstract_coverage_pct": stats.abstract_coverage_pct,
+        "year_min": stats.year_min,
+        "year_max": stats.year_max,
+    }
+
+
+# =========================================================
+# Stages
+# =========================================================
+
+def run_pico_stage(protocol_data: dict, progress: ProgressCallback = None) -> dict:
+    emit(progress, "⏳ Guardando etapa 1...")
+    protocol_path = save_protocol(protocol_data)
+
+    checks = validate_protocol_data(protocol_data)
+    validation = save_validation_reports("stage_1_pico", checks)
+
+    state = load_pipeline_state()
+    state["protocol_path"] = str(protocol_path)
+    state.setdefault("artifacts", {})
+    state["artifacts"]["validation_report_stage_1_pico_json"] = validation["json"]
+    state["artifacts"]["validation_report_stage_1_pico_csv"] = validation["csv"]
+    state["artifacts"]["validation_report_stage_1_pico_md"] = validation["md"]
+    state["artifacts"]["validation_history_jsonl"] = validation["history"]
+    state = mark_stage_completed("stage_1_pico", state)
+    save_pipeline_state(state)
+    audit_event("stage_1_pico", "finished", {"validation_status": validation["global_status"]})
+
+    emit(progress, f"✅ Etapa 1 guardada. Validación: {validation['global_status']}")
+    return {
+        "protocol_path": str(protocol_path),
+        "validation": validation,
+        "completed_stages": state.get("completed_stages", []),
+    }
+
+
+def run_search_stage(
+    openalex_core_input: Optional[str] = None,
+    openalex_exploratory_1_input: Optional[str] = None,
+    openalex_exploratory_2_input: Optional[str] = None,
+    scopus_core_csv: Optional[str] = None,
+    scopus_exploratory_1_csv: Optional[str] = None,
+    scopus_exploratory_2_csv: Optional[str] = None,
+    user_input_openalex: Optional[str] = None,
+    scopus_exploratory_csv: Optional[str] = None,
+    progress: ProgressCallback = None,
+    per_page_openalex: int = 100,
+) -> Dict:
+    # Usa el archivo descargable para esta parte completa:
+    raise NotImplementedError("Usa el archivo completo pipeline_validated.py para esta sección final.")
+
+
+
+#  Pendiente de seguir con:
+# - run_search_stage completo
+# - run_screening_stage completo
+# - run_quality_stage / run_synthesis_stage / run_prisma_stage completos
+

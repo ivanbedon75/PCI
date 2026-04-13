@@ -1,0 +1,19 @@
+{
+  "description": "Archivos de prueba para pipeline SRA: OpenAlex y Scopus",
+  "counts": {
+    "openalex_core": 2,
+    "openalex_exploratory_1": 3,
+    "openalex_exploratory_2": 3,
+    "scopus_core": 2,
+    "scopus_exploratory_1": 3,
+    "scopus_exploratory_2": 3
+  },
+  "files": [
+    "openalex_core_test.csv",
+    "openalex_exploratory_1_test.csv",
+    "openalex_exploratory_2_test.csv",
+    "scopus_core_test.csv",
+    "scopus_exploratory_1_test.csv",
+    "scopus_exploratory_2_test.csv"
+  ]
+}

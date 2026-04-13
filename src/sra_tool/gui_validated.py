@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from __future__ import annotations
 
-"""Interfaz profesional para gestión auditada del pipeline de revisión sistemática."""
+from __future__ import annotations
 
 import inspect
 import json
@@ -19,7 +18,7 @@ import pandas as pd
 from . import pipeline
 
 
-APP_TITLE = "Inmaterial Cultural Heritage | Systematic Review Workbench"
+APP_TITLE = "Inmaterial Cultural Heritage"
 
 
 class InmaterialCulturalHeritageApp(tk.Tk):
@@ -42,14 +41,8 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self.minsize(1400, 860)
 
         self.pipeline_result: dict | None = None
-        self.screening_df: pd.DataFrame | None = None
+        self.screening_df = None
         self.screening_edit_widget = None
-        self.status_cards: dict[str, tk.StringVar] = {}
-        self.artifact_choice_var = tk.StringVar(value="executive_report_html")
-
-        self.openalex_core_path = tk.StringVar(value="")
-        self.openalex_exploratory_1_path = tk.StringVar(value="")
-        self.openalex_exploratory_2_path = tk.StringVar(value="")
 
         self.scopus_core_path = tk.StringVar(value="")
         self.scopus_exploratory_1_path = tk.StringVar(value="")
@@ -64,9 +57,6 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._build_ui()
         self._load_protocol_if_exists()
         self._load_state_if_exists()
-        self._render_status_summary()
-        self.protocol("WM_DELETE_WINDOW", self._on_close_app)
-
 
     # =====================================================
     # UI
@@ -103,94 +93,11 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._build_right_panel(right)
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
-        summary_frame = ttk.LabelFrame(parent, text="Resumen ejecutivo", padding=10)
-        summary_frame.pack(fill="x", pady=(0, 10))
-        self._build_status_cards(summary_frame)
-
-        artifact_frame = ttk.LabelFrame(parent, text="Accesos rápidos a artefactos", padding=10)
-        artifact_frame.pack(fill="x", pady=(0, 10))
-        self._build_artifact_toolbar(artifact_frame)
-
-        console_frame = ttk.LabelFrame(parent, text="Bitácora operativa", padding=10)
+        console_frame = ttk.LabelFrame(parent, text="Consola de procesos", padding=10)
         console_frame.pack(fill="both", expand=True)
 
         self.console = tk.Text(console_frame, wrap="word", state="disabled", height=20)
         self.console.pack(fill="both", expand=True)
-
-    def _build_status_cards(self, parent: ttk.Frame) -> None:
-        container = ttk.Frame(parent)
-        container.pack(fill="x")
-
-        labels = [
-            ("completed_stages", "Etapas completadas"),
-            ("records_identified_total", "Identificados"),
-            ("records_after_deduplication", "Post-deduplicación"),
-            ("duplicates_removed", "Duplicados removidos"),
-            ("doi_coverage_pct", "Cobertura DOI"),
-            ("abstract_coverage_pct", "Cobertura abstract"),
-        ]
-
-        for idx, (key, title) in enumerate(labels):
-            card = ttk.Frame(container, padding=6)
-            card.grid(row=idx // 2, column=idx % 2, sticky="nsew", padx=4, pady=4)
-            container.columnconfigure(idx % 2, weight=1)
-
-            var = tk.StringVar(value="—")
-            self.status_cards[key] = var
-
-            ttk.Label(card, text=title, font=("Arial", 9, "bold")).pack(anchor="w")
-            ttk.Label(card, textvariable=var, font=("Arial", 11)).pack(anchor="w", pady=(2, 0))
-
-    def _build_artifact_toolbar(self, parent: ttk.Frame) -> None:
-        choices = [
-            "executive_report_html",
-            "methodology_checklist_md",
-            "methodology_checklist_json",
-            "screening_matrix_csv",
-            "deduplicated_records_csv",
-            "harmonized_records_csv",
-            "validation_report_stage_2_search_md",
-            "audit_summary_md",
-            "audit_snapshot_json",
-            "manifest_json",
-            "source_manifest_json",
-            "reproducibility_package_zip",
-            "prisma_counts_json",
-            "prisma_diagram_png",
-            "std_protocol_path",
-            "std_source_manifest_json",
-            "std_search_summary_json",
-            "std_harmonized_records_csv",
-            "std_deduplicated_records_csv",
-            "std_screening_matrix_csv",
-            "std_quality_profile_json",
-            "std_prisma_counts_json",
-            "std_audit_snapshot_json",
-            "std_audit_summary_md",
-            "std_executive_report_html",
-            "std_methodology_checklist_json",
-            "std_methodology_checklist_md",
-            "std_reproducibility_package_zip",
-        ]
-
-        ttk.Combobox(
-            parent,
-            textvariable=self.artifact_choice_var,
-            values=choices,
-            state="readonly",
-        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        ttk.Button(
-            parent,
-            text="Abrir",
-            command=lambda: self._open_artifact(self.artifact_choice_var.get()),
-        ).pack(side="left", padx=4)
-
-        ttk.Button(
-            parent,
-            text="Guardar como",
-            command=self._save_selected_artifact_as,
-        ).pack(side="left", padx=4)
 
     def _build_stage_notebook(self, parent: ttk.Frame) -> None:
         self.stage_notebook = ttk.Notebook(parent)
@@ -240,15 +147,16 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         actions.pack(fill="x", pady=(10, 0))
         ttk.Button(actions, text="Salir", command=self._exit_and_clear_statistics).pack(side="left")
 
+
     # =====================================================
-    # Tabs
+    # Tab 1
     # =====================================================
 
     def _build_tab1(self) -> None:
         frame = self._build_stage_panel(
-            self.tab1,
-            "1. Formulación",
-            "Complete los tres campos metodológicos principales.",
+        self.tab1,
+        "1. Formulación",
+        "Complete los tres campos metodológicos principales. La información se guarda y permanece disponible.",
         )
 
         form = ttk.LabelFrame(frame, text="Información esencial", padding=10)
@@ -270,11 +178,15 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=4)
         ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
 
+        # =====================================================
+        # Tab 2
+        # =====================================================
+
     def _build_tab2(self) -> None:
         frame = self._build_stage_panel(
-            self.tab2,
-            "2. Búsqueda sistemática",
-            "Integra 1 core + 2 exploratory para OpenAlex y Scopus.",
+        self.tab2,
+        "2. Búsqueda sistemática",
+        "Integra 1 core + 2 exploratory para OpenAlex y Scopus, harmoniza y deduplica con trazabilidad auditable.",
         )
 
         sources_box = ttk.LabelFrame(frame, text="Fuentes de búsqueda", padding=10)
@@ -283,83 +195,67 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         openalex_box = ttk.LabelFrame(sources_box, text="OpenAlex", padding=10)
         openalex_box.pack(fill="x", pady=(0, 10))
 
-        self._file_row(
-            openalex_box,
-            "JSON OpenAlex core:",
-            self.openalex_core_path,
-            self._select_openalex_core_file,
-        )
-        self._file_row(
-            openalex_box,
-            "JSON OpenAlex exploratory 1:",
-            self.openalex_exploratory_1_path,
-            self._select_openalex_exploratory_1_file,
-        )
-        self._file_row(
-            openalex_box,
-            "JSON OpenAlex exploratory 2:",
-            self.openalex_exploratory_2_path,
-            self._select_openalex_exploratory_2_file,
-        )
+        ttk.Label(openalex_box, text="URL OpenAlex core:").pack(anchor="w")
+        self.openalex_core_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_core_text.pack(fill="x", expand=True, pady=(4, 6))
+
+        ttk.Label(openalex_box, text="URL OpenAlex exploratory 1:").pack(anchor="w")
+        self.openalex_exploratory_1_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_exploratory_1_text.pack(fill="x", expand=True, pady=(4, 6))
+
+        ttk.Label(openalex_box, text="URL OpenAlex exploratory 2:").pack(anchor="w")
+        self.openalex_exploratory_2_text = tk.Text(openalex_box, height=3, wrap="word")
+        self.openalex_exploratory_2_text.pack(fill="x", expand=True, pady=(4, 6))
 
         note = ttk.Label(
-            openalex_box,
-            text=(
-                "Ingrese los archivos .json descargados desde OpenAlex para las tres "
-                "estrategias. En la etapa 2 el sistema convierte automáticamente esos "
-                "JSON a CSV con estructura tipo Scopus."
-            ),
-            wraplength=900,
-            justify="left",
+        openalex_box,
+        text="Cada estrategia se descargará con cursor cuando corresponda.",
         )
-        note.pack(anchor="w", pady=(6, 0))
+        note.pack(anchor="w")
 
         scopus_box = ttk.LabelFrame(sources_box, text="Scopus", padding=10)
         scopus_box.pack(fill="x")
 
-        self._file_row(
-            scopus_box,
-            "CSV Scopus core:",
-            self.scopus_core_path,
-            self._select_scopus_core_csv,
-        )
-        self._file_row(
-            scopus_box,
-            "CSV Scopus exploratory 1:",
-            self.scopus_exploratory_1_path,
-            self._select_scopus_exploratory_1_csv,
-        )
-        self._file_row(
-            scopus_box,
-            "CSV Scopus exploratory 2:",
-            self.scopus_exploratory_2_path,
-            self._select_scopus_exploratory_2_csv,
-        )
+        row1 = ttk.Frame(scopus_box)
+        row1.pack(fill="x", pady=4)
+        ttk.Label(row1, text="CSV Scopus core:", width=22).pack(side="left")
+        ttk.Entry(row1, textvariable=self.scopus_core_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row1, text="Cargar...", command=self._select_scopus_core_csv).pack(side="left")
+
+        row2 = ttk.Frame(scopus_box)
+        row2.pack(fill="x", pady=4)
+        ttk.Label(row2, text="CSV Scopus exploratory 1:", width=22).pack(side="left")
+        ttk.Entry(row2, textvariable=self.scopus_exploratory_1_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row2, text="Cargar...", command=self._select_scopus_exploratory_1_csv).pack(side="left")
+
+        row3 = ttk.Frame(scopus_box)
+        row3.pack(fill="x", pady=4)
+        ttk.Label(row3, text="CSV Scopus exploratory 2:", width=22).pack(side="left")
+        ttk.Entry(row3, textvariable=self.scopus_exploratory_2_path).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row3, text="Cargar...", command=self._select_scopus_exploratory_2_csv).pack(side="left")
 
         process_box = ttk.LabelFrame(frame, text="Proceso de etapa 2", padding=10)
         process_box.pack(fill="x")
 
         self.stage2_btn = ttk.Button(
-            process_box,
-            text="Ejecutar etapa 2",
-            command=self._run_stage_2,
+        process_box,
+        text="Validar información ingresada",
+        command=self._run_stage_2,
         )
         self.stage2_btn.pack(fill="x", pady=3)
 
         self._add_tab_exit_button(frame)
 
-    def _file_row(self, parent, label: str, var: tk.StringVar, command) -> None:
-        row = ttk.Frame(parent)
-        row.pack(fill="x", pady=4)
-        ttk.Label(row, text=label, width=28).pack(side="left")
-        ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row, text="Cargar...", command=command).pack(side="left")
+
+        # =====================================================
+        # Tab 3
+        # =====================================================
 
     def _build_tab3(self) -> None:
         frame = self._build_stage_panel(
-            self.tab3,
-            "3. Cribado",
-            "Previsualice y edite screening_matrix.csv sin salir de la aplicación.",
+        self.tab3,
+        "3. Cribado",
+        "Previsualice y edite screening_matrix.csv sin salir de la aplicación. Luego actualice los cálculos.",
         )
 
         actions = ttk.LabelFrame(frame, text="Proceso de etapa 3", padding=10)
@@ -396,12 +292,12 @@ class InmaterialCulturalHeritageApp(tk.Tk):
 
         self._add_tab_exit_button(frame)
 
+        # =====================================================
+        # Tab 4/5/6/7
+        # =====================================================
+
     def _build_tab4(self) -> None:
-        frame = self._build_stage_panel(
-            self.tab4,
-            "4. Extracción",
-            "Registra el avance de extracción sin recalcular etapas previas.",
-        )
+        frame = self._build_stage_panel(self.tab4, "4. Extracción", "Registra el avance de extracción sin recalcular etapas previas.")
         box = ttk.LabelFrame(frame, text="Proceso de etapa 4", padding=10)
         box.pack(fill="x")
         self.stage4_btn = ttk.Button(box, text="Registrar etapa 4", command=self._run_stage_4)
@@ -409,11 +305,7 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._add_tab_exit_button(frame)
 
     def _build_tab5(self) -> None:
-        frame = self._build_stage_panel(
-            self.tab5,
-            "5. Calidad",
-            "Actualiza quality profile con los datos realmente existentes.",
-        )
+        frame = self._build_stage_panel(self.tab5, "5. Calidad", "Actualiza quality profile con los datos realmente existentes.")
         box = ttk.LabelFrame(frame, text="Proceso de etapa 5", padding=10)
         box.pack(fill="x")
         self.stage5_btn = ttk.Button(box, text="Actualizar evaluación de calidad", command=self._run_stage_5)
@@ -421,11 +313,7 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._add_tab_exit_button(frame)
 
     def _build_tab6(self) -> None:
-        frame = self._build_stage_panel(
-            self.tab6,
-            "6. Síntesis",
-            "Prepara artefactos para síntesis sin relanzar toda la cadena.",
-        )
+        frame = self._build_stage_panel(self.tab6, "6. Síntesis", "Prepara artefactos para síntesis sin relanzar toda la cadena.")
         box = ttk.LabelFrame(frame, text="Proceso de etapa 6", padding=10)
         box.pack(fill="x")
         self.stage6_btn = ttk.Button(box, text="Preparar síntesis", command=self._run_stage_6)
@@ -433,17 +321,14 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._add_tab_exit_button(frame)
 
     def _build_tab7(self) -> None:
-        frame = self._build_stage_panel(
-            self.tab7,
-            "7. PRISMA",
-            "Recalcula PRISMA únicamente con la información existente.",
-        )
+        frame = self._build_stage_panel(self.tab7, "7. PRISMA", "Recalcula PRISMA únicamente con la información que realmente ya existe.")
         box = ttk.LabelFrame(frame, text="Proceso de etapa 7", padding=10)
         box.pack(fill="x")
         self.stage7_btn = ttk.Button(box, text="Actualizar reporte PRISMA", command=self._run_stage_7)
         self.stage7_btn.pack(fill="x", pady=3)
         self._add_tab_exit_button(frame)
 
+       
     # =====================================================
     # Load persisted data
     # =====================================================
@@ -478,30 +363,6 @@ class InmaterialCulturalHeritageApp(tk.Tk):
     def _collect_stage1_data(self) -> dict:
         return {k: v.get().strip() for k, v in self.stage1_vars.items()}
 
-    def _select_openalex_core_file(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Seleccionar JSON OpenAlex core",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        if path:
-            self.openalex_core_path.set(path)
-
-    def _select_openalex_exploratory_1_file(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Seleccionar JSON OpenAlex exploratory 1",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        if path:
-            self.openalex_exploratory_1_path.set(path)
-
-    def _select_openalex_exploratory_2_file(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Seleccionar JSON OpenAlex exploratory 2",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-        )
-        if path:
-            self.openalex_exploratory_2_path.set(path)
-
     def _select_scopus_core_csv(self) -> None:
         path = filedialog.askopenfilename(
             title="Seleccionar CSV Scopus core",
@@ -532,39 +393,24 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self.console.configure(state="disabled")
 
     def log(self, message: str) -> None:
-        prefix = pd.Timestamp.now().strftime("[%H:%M:%S] ")
         self.console.configure(state="normal")
-        self.console.insert("end", prefix + message + "\n")
+        self.console.insert("end", message + "\n")
         self.console.see("end")
         self.console.configure(state="disabled")
         self.update_idletasks()
 
     def _set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
-        for btn_name in [
-            "stage2_btn",
-            "stage3_btn",
-            "stage4_btn",
-            "stage5_btn",
-            "stage6_btn",
-            "stage7_btn",
-        ]:
+        for btn_name in ["stage2_btn", "stage3_btn", "stage4_btn", "stage5_btn", "stage6_btn", "stage7_btn"]:
             if hasattr(self, btn_name):
                 getattr(self, btn_name).configure(state=state)
 
         self.status_var.set("Procesando... por favor espere." if busy else "Listo.")
 
-    def _safe_show_error(self, title: str, message: str) -> None:
-        try:
-            if self.winfo_exists():
-                messagebox.showerror(title, message)
-        except tk.TclError:
-            pass
-
     def _validate_stage2_inputs(self) -> bool:
-        openalex_core = self.openalex_core_path.get().strip()
-        openalex_exploratory_1 = self.openalex_exploratory_1_path.get().strip()
-        openalex_exploratory_2 = self.openalex_exploratory_2_path.get().strip()
+        openalex_core = self.openalex_core_text.get("1.0", "end").strip()
+        openalex_exploratory_1 = self.openalex_exploratory_1_text.get("1.0", "end").strip()
+        openalex_exploratory_2 = self.openalex_exploratory_2_text.get("1.0", "end").strip()
 
         scopus_core = self.scopus_core_path.get().strip()
         scopus_exploratory_1 = self.scopus_exploratory_1_path.get().strip()
@@ -595,9 +441,6 @@ class InmaterialCulturalHeritageApp(tk.Tk):
             return False
 
         for label, path_str in [
-            ("OpenAlex core", openalex_core),
-            ("OpenAlex exploratory 1", openalex_exploratory_1),
-            ("OpenAlex exploratory 2", openalex_exploratory_2),
             ("Scopus core", scopus_core),
             ("Scopus exploratory 1", scopus_exploratory_1),
             ("Scopus exploratory 2", scopus_exploratory_2),
@@ -606,19 +449,8 @@ class InmaterialCulturalHeritageApp(tk.Tk):
                 messagebox.showerror("Archivo no encontrado", f"No se encontró el archivo de {label}:\n{path_str}")
                 return False
 
-        for label, path_str in [
-            ("OpenAlex core", openalex_core),
-            ("OpenAlex exploratory 1", openalex_exploratory_1),
-            ("OpenAlex exploratory 2", openalex_exploratory_2),
-        ]:
-            if path_str and Path(path_str).suffix.lower() != ".json":
-                messagebox.showerror(
-                    "Formato inválido",
-                    f"{label} debe cargarse como archivo .json exportado desde OpenAlex.\n\nArchivo recibido:\n{path_str}",
-                )
-                return False
-
         return True
+
 
     def _build_stage2_kwargs(self, openalex_inputs: dict, scopus_inputs: dict) -> dict:
         sig = inspect.signature(pipeline.run_search_stage)
@@ -650,6 +482,17 @@ class InmaterialCulturalHeritageApp(tk.Tk):
 
         return kwargs
 
+        for key, value in mapping.items():
+            if key in params:
+                kwargs[key] = value
+
+        if "user_input_openalex" in params and "openalex_core_input" not in params:
+            kwargs["user_input_openalex"] = openalex_inputs["core"]
+        if "scopus_exploratory_csv" in params and "scopus_exploratory_1_csv" not in params:
+            kwargs["scopus_exploratory_csv"] = scopus_inputs["exploratory_1"]
+
+        return kwargs
+
     # =====================================================
     # Stage actions
     # =====================================================
@@ -658,19 +501,12 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         self._clear_console()
         self.log("⏳ Guardando etapa 1...")
         try:
-            result = pipeline.run_pico_stage(
-                self._collect_stage1_data(),
-                progress=self.log,
-            )
-            self._apply_result(result)
+            result = pipeline.run_pico_stage(self._collect_stage1_data(), progress=self.log)
             self.log(f"✅ Etapa 1 guardada en: {result['protocol_path']}")
             if "validation" in result:
-                self.log(
-                    f"🧪 Validación etapa 1: "
-                    f"{result['validation'].get('global_status', 'N/A')}"
-                )
+                self.log(f"🧪 Validación etapa 1: {result['validation'].get('global_status', 'N/A')}")
         except Exception as e:
-            self._safe_show_error("Error", str(e))
+            messagebox.showerror("Error", str(e))
 
     def _run_stage_2(self) -> None:
         if not self._validate_stage2_inputs():
@@ -678,17 +514,13 @@ class InmaterialCulturalHeritageApp(tk.Tk):
 
         self._clear_console()
         self.log("⏳ Iniciando etapa 2...")
-        self.log(
-            "ℹ️ Se leerán 3 archivos JSON de OpenAlex y 3 CSV de Scopus. "
-            "Los JSON de OpenAlex se convertirán automáticamente a CSV tipo "
-            "Scopus antes de la integración, harmonización y deduplicación."
-        )
+        self.log("ℹ️ Se leerán OpenAlex y Scopus en estructura 1 core + 2 exploratory por base, luego integración, harmonization y deduplicación.")
         self._set_busy(True)
 
         openalex_inputs = {
-            "core": self.openalex_core_path.get().strip() or None,
-            "exploratory_1": self.openalex_exploratory_1_path.get().strip() or None,
-            "exploratory_2": self.openalex_exploratory_2_path.get().strip() or None,
+            "core": self.openalex_core_text.get("1.0", "end").strip() or None,
+            "exploratory_1": self.openalex_exploratory_1_text.get("1.0", "end").strip() or None,
+            "exploratory_2": self.openalex_exploratory_2_text.get("1.0", "end").strip() or None,
         }
         scopus_inputs = {
             "core": self.scopus_core_path.get().strip() or None,
@@ -710,25 +542,13 @@ class InmaterialCulturalHeritageApp(tk.Tk):
             self.after(0, self._apply_result, result)
             self.after(0, self._load_screening_preview)
         except TypeError as e:
-            self.after(
-                0,
-                self.log,
-                "❌ Error etapa 2: la firma de pipeline.run_search_stage no coincide "
-                "con la estrategia de 1 core + 2 exploratory por base de datos.",
-            )
-            self.after(
-                0,
-                lambda: self._safe_show_error(
-                    "Error",
-                    "La firma de pipeline.run_search_stage no coincide con la nueva "
-                    "estrategia de 1 core + 2 exploratory por base de datos.\n\n"
-                    f"Detalle: {e}",
-                ),
-            )
+            self.after(0, lambda: messagebox.showerror(
+                "Error",
+                f"La firma de pipeline.run_search_stage no coincide con la nueva estrategia de 1 core + 2 exploratory por base de datos.\n\nDetalle: {e}",
+            ))
             self.after(0, self._set_busy, False)
         except Exception as e:
-            self.after(0, self.log, f"❌ Error etapa 2: {e}")
-            self.after(0, lambda: self._safe_show_error("Error", str(e)))
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.after(0, self._set_busy, False)
 
     def _run_stage_3(self) -> None:
@@ -754,6 +574,7 @@ class InmaterialCulturalHeritageApp(tk.Tk):
             daemon=True,
         )
         worker.start()
+
 
     def _run_stage_5(self) -> None:
         self._clear_console()
@@ -798,12 +619,11 @@ class InmaterialCulturalHeritageApp(tk.Tk):
             if fn == pipeline.run_screening_stage:
                 self.after(0, self._load_screening_preview)
         except Exception as e:
-            self.after(0, self.log, f"❌ Error de ejecución: {e}")
-            self.after(0, lambda: self._safe_show_error("Error", str(e)))
+            self.after(0, lambda: messagebox.showerror("Error", str(e)))
             self.after(0, self._set_busy, False)
 
     # =====================================================
-    # Screening preview / edit
+    # Screening preview/edit
     # =====================================================
 
     def _load_screening_preview(self) -> None:
@@ -817,7 +637,7 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         try:
             self.screening_df = pd.read_csv(path, encoding="utf-8-sig")
         except Exception as e:
-            self._safe_show_error("Error", str(e))
+            messagebox.showerror("Error", str(e))
             return
 
         self._render_screening_tree()
@@ -847,11 +667,13 @@ class InmaterialCulturalHeritageApp(tk.Tk):
 
         item_id = self.screening_tree.identify_row(event.y)
         col_id = self.screening_tree.identify_column(event.x)
+
         if not item_id or not col_id:
             return
 
         col_index = int(col_id.replace("#", "")) - 1
         column_name = self.screening_tree["columns"][col_index]
+
         if column_name not in self.EDITABLE_SCREENING_COLUMNS:
             return
 
@@ -870,21 +692,22 @@ class InmaterialCulturalHeritageApp(tk.Tk):
         entry.place(x=x, y=y, width=width, height=height)
         entry.focus()
 
-        def save_edit(_event=None):
-            new_value = entry.get()
-            self.screening_tree.set(item_id, column_name, new_value)
-            row_index = int(item_id)
-            self.screening_df.at[row_index, column_name] = new_value
-            entry.destroy()
-            self.screening_edit_widget = None
+    def save_edit(_event=None):
+        new_value = entry.get()
+        self.screening_tree.set(item_id, column_name, new_value)
+        row_index = int(item_id)
+        self.screening_df.at[row_index, column_name] = new_value
+        entry.destroy()
+        self.screening_edit_widget = None
 
-        def cancel_edit(_event=None):
-            entry.destroy()
-            self.screening_edit_widget = None
+    def cancel_edit(_event=None):
+        entry.destroy()
+        self.screening_edit_widget = None
 
         entry.bind("<Return>", save_edit)
         entry.bind("<FocusOut>", save_edit)
         entry.bind("<Escape>", cancel_edit)
+
         self.screening_edit_widget = entry
 
     def _save_screening_changes(self) -> None:
@@ -894,42 +717,63 @@ class InmaterialCulturalHeritageApp(tk.Tk):
 
         path = self._artifact_path("screening_matrix_csv")
         if not path:
-            path = pipeline.get_processed_dir() / "screening_matrix.csv"
+           path = pipeline.get_processed_dir() / "screening_matrix.csv"
 
         try:
             self.screening_df.to_csv(path, index=False, encoding="utf-8-sig")
             self.log(f"✅ Screening guardado en: {path}")
             messagebox.showinfo("Screening", "Los cambios fueron guardados.")
         except Exception as e:
-            self._safe_show_error("Error", str(e))
+            messagebox.showerror("Error", str(e))
 
-    # =====================================================
-    # Result rendering / artifacts
-    # =====================================================
+        # =====================================================
+        # Result rendering / Artifacts
+        # =====================================================
 
     def _apply_result(self, result: dict) -> None:
         self.pipeline_result = result
         self._set_busy(False)
-        self._render_status_summary()
         self.log("✅ Etapa finalizada.")
-
         validation = result.get("validation")
         if isinstance(validation, dict):
-            self.log(f"🧪 Validación: {validation.get('global_status', 'N/A')}")
+         self.log(f"🧪 Validación: {validation.get('global_status', 'N/A')}")
 
-    def _render_status_summary(self) -> None:
-        stats = (self.pipeline_result or {}).get("stats", {}) or {}
-        completed = (self.pipeline_result or {}).get("completed_stages", []) or []
+    def _reset_right_panel(self) -> None:
+        self._clear_console()
+        self.pipeline_result = None
+        self.status_var.set("Listo.")
 
-        self.status_cards["completed_stages"].set(str(len(completed)))
-        self.status_cards["records_identified_total"].set(str(stats.get("records_identified_total", 0)))
-        self.status_cards["records_after_deduplication"].set(str(stats.get("records_after_deduplication", 0)))
-        self.status_cards["duplicates_removed"].set(str(stats.get("duplicates_removed", 0)))
+    def _reset_screening_preview(self) -> None:
+        self.screening_df = None
 
-        doi = stats.get("doi_coverage_pct", 0.0)
-        abst = stats.get("abstract_coverage_pct", 0.0)
-        self.status_cards["doi_coverage_pct"].set(f"{doi}%")
-        self.status_cards["abstract_coverage_pct"].set(f"{abst}%")
+        if self.screening_edit_widget is not None:
+            try:
+                self.screening_edit_widget.destroy()
+            except Exception:
+                pass
+            self.screening_edit_widget = None
+
+        if hasattr(self, "screening_tree"):
+            for item in self.screening_tree.get_children():
+                self.screening_tree.delete(item)
+            self.screening_tree["columns"] = ()
+
+    def _exit_and_clear_statistics(self) -> None:
+        confirm = messagebox.askyesno(
+        "Salir",
+        "¿Desea salir y borrar los datos estadísticos y archivos procesados guardados?",
+        )
+        if not confirm:
+            return
+        try:
+           pipeline.clear_statistical_data()
+           self._reset_screening_preview()
+           self._reset_right_panel()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        self.destroy()
 
     def _artifact_path(self, key: str) -> Path | None:
         if self.pipeline_result:
@@ -947,32 +791,24 @@ class InmaterialCulturalHeritageApp(tk.Tk):
     def _open_artifact(self, key: str) -> None:
         path = self._artifact_path(key)
         if not path:
-            messagebox.showwarning("Archivo no disponible", "No se encontró el archivo solicitado.")
+            messagebox.showwarning(
+                "Archivo no disponible",
+                "No se encontró el archivo solicitado.",
+            )
             return
 
         try:
-            webbrowser.open(path.resolve().as_uri())
+           webbrowser.open(path.resolve().as_uri())
         except Exception as e:
-            self._safe_show_error("Error", str(e))
-
-    def _save_selected_artifact_as(self) -> None:
-        key = self.artifact_choice_var.get().strip()
-        if not key:
-            messagebox.showwarning("Artefacto", "Seleccione un artefacto.")
-            return
-
-        src = self._artifact_path(key)
-        if not src:
-            messagebox.showwarning("Artefacto", "No se encontró el artefacto seleccionado.")
-            return
-
-        extension = src.suffix or ".dat"
-        self._save_artifact_as(key, extension)
+           messagebox.showerror("Error", str(e))
 
     def _save_artifact_as(self, key: str, extension: str) -> None:
         src = self._artifact_path(key)
         if not src:
-            messagebox.showwarning("Archivo no disponible", "No se encontró el archivo solicitado.")
+            messagebox.showwarning(
+                "Archivo no disponible",
+                "No se encontró el archivo solicitado.",
+            )
             return
 
         dst = filedialog.asksaveasfilename(
@@ -988,48 +824,7 @@ class InmaterialCulturalHeritageApp(tk.Tk):
             shutil.copyfile(src, dst)
             messagebox.showinfo("Archivo guardado", f"Se guardó una copia en:\n{dst}")
         except Exception as e:
-            self._safe_show_error("Error", str(e))
-
-    def _reset_right_panel(self) -> None:
-        self._clear_console()
-        self.pipeline_result = None
-        self.status_var.set("Listo.")
-        self._render_status_summary()
-
-    def _reset_screening_preview(self) -> None:
-        self.screening_df = None
-
-        if self.screening_edit_widget is not None:
-            try:
-                self.screening_edit_widget.destroy()
-            except Exception:
-                pass
-            self.screening_edit_widget = None
-
-        if hasattr(self, "screening_tree"):
-            for item in self.screening_tree.get_children():
-                self.screening_tree.delete(item)
-            self.screening_tree["columns"] = ()
-
-    def _on_close_app(self) -> None:
-        try:
-            pipeline.clear_statistical_data()
-            self._reset_screening_preview()
-            self._reset_right_panel()
-        except Exception:
-            pass
-        finally:
-            self.destroy()
-
-    def _exit_and_clear_statistics(self) -> None:
-        try:
-            pipeline.clear_statistical_data()
-            self._reset_screening_preview()
-            self._reset_right_panel()
-        except Exception as e:
-            self._safe_show_error("Error", str(e))
-        finally:
-            self.destroy()
+            messagebox.showerror("Error", str(e))
 
 
 def main() -> None:

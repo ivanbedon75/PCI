@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr  7 18:21:24 2026
+
+@author: ivan
+"""
+
+from pathlib import Path
+import pandas as pd
+import json
+import zipfile
+
+base = Path("D:/prueba/test_api_archivos")
+base.mkdir(parents=True, exist_ok=True)
+
+# -----------------------------
+# OpenAlex-like test files
+# -----------------------------
+openalex_columns = [
+    "id",
+    "title",
+    "doi",
+    "publication_year",
+    "authors",
+    "source_display_name",
+    "abstract_inverted_index_present",
+    "keywords",
+    "type",
+    "language",
+    "institutions",
+    "cited_by_count",
+]
+
+openalex_core = pd.DataFrame([
+    {
+        "id": "https://openalex.org/W1000001",
+        "title": "Safeguarding Intangible Cultural Heritage through Digital Archives",
+        "doi": "https://doi.org/10.1000/oacore1",
+        "publication_year": 2022,
+        "authors": "Ana Perez | Luis Gomez",
+        "source_display_name": "Journal of Cultural Heritage",
+        "abstract_inverted_index_present": True,
+        "keywords": "intangible heritage | digital preservation | archives",
+        "type": "article",
+        "language": "en",
+        "institutions": "Universidad Andina | Universidad de Cuenca",
+        "cited_by_count": 12,
+    },
+    {
+        "id": "https://openalex.org/W1000002",
+        "title": "Community Participation in Intangible Heritage Preservation",
+        "doi": "https://doi.org/10.1000/oacore2",
+        "publication_year": 2021,
+        "authors": "Maria Lopez | John Smith",
+        "source_display_name": "Heritage and Society Review",
+        "abstract_inverted_index_present": True,
+        "keywords": "community participation | safeguarding | living heritage",
+        "type": "article",
+        "language": "en",
+        "institutions": "Universidad Central del Ecuador | University of Leeds",
+        "cited_by_count": 8,
+    },
+])
+
+openalex_exploratory_1 = pd.DataFrame([
+    {
+        "id": "https://openalex.org/W1000011",
+        "title": "Festival Memory and Oral Traditions in the Andes",
+        "doi": "https://doi.org/10.1000/oaexp11",
+        "publication_year": 2020,
+        "authors": "Carlos Mena | Elena Ruiz",
+        "source_display_name": "Andean Studies Journal",
+        "abstract_inverted_index_present": True,
+        "keywords": "oral traditions | festivals | Andes",
+        "type": "article",
+        "language": "es",
+        "institutions": "FLACSO Ecuador",
+        "cited_by_count": 5,
+    },
+    {
+        "id": "https://openalex.org/W1000012",
+        "title": "Museums and Transmission of Traditional Knowledge",
+        "doi": "https://doi.org/10.1000/oaexp12",
+        "publication_year": 2019,
+        "authors": "Rosa Vega | Peter Lang",
+        "source_display_name": "Museum Practice Quarterly",
+        "abstract_inverted_index_present": True,
+        "keywords": "museums | traditional knowledge | transmission",
+        "type": "article",
+        "language": "en",
+        "institutions": "Universidad de Salamanca",
+        "cited_by_count": 9,
+    },
+    {
+        "id": "https://openalex.org/W1000013",
+        "title": "Digital Storytelling for Safeguarding Living Heritage",
+        "doi": "https://doi.org/10.1000/oaexp13",
+        "publication_year": 2023,
+        "authors": "Lucia Torres | Emma Brown",
+        "source_display_name": "Digital Humanities Heritage",
+        "abstract_inverted_index_present": True,
+        "keywords": "digital storytelling | living heritage | safeguarding",
+        "type": "article",
+        "language": "en",
+        "institutions": "Pontificia Universidad Católica del Ecuador",
+        "cited_by_count": 4,
+    },
+])
+
+openalex_exploratory_2 = pd.DataFrame([
+    {
+        "id": "https://openalex.org/W1000021",
+        "title": "Education Policies for Intangible Heritage in Schools",
+        "doi": "https://doi.org/10.1000/oaexp21",
+        "publication_year": 2018,
+        "authors": "Patricia Leon | Diego Arias",
+        "source_display_name": "Education and Heritage",
+        "abstract_inverted_index_present": True,
+        "keywords": "education policy | schools | heritage",
+        "type": "article",
+        "language": "es",
+        "institutions": "Ministerio de Educación del Ecuador",
+        "cited_by_count": 6,
+    },
+    {
+        "id": "https://openalex.org/W1000022",
+        "title": "Craftsmanship Networks and Local Identity",
+        "doi": "https://doi.org/10.1000/oaexp22",
+        "publication_year": 2022,
+        "authors": "Hector Salazar | Nina Green",
+        "source_display_name": "Local Identity Review",
+        "abstract_inverted_index_present": True,
+        "keywords": "craftsmanship | networks | local identity",
+        "type": "article",
+        "language": "en",
+        "institutions": "Universidad de Cuenca",
+        "cited_by_count": 7,
+    },
+    {
+        "id": "https://openalex.org/W1000023",
+        "title": "Ritual Performance, Memory, and Safeguarding Strategies",
+        "doi": "https://doi.org/10.1000/oaexp23",
+        "publication_year": 2021,
+        "authors": "Sofia Acosta | Miguel Herrera",
+        "source_display_name": "Performance Heritage Studies",
+        "abstract_inverted_index_present": False,
+        "keywords": "ritual performance | memory | safeguarding",
+        "type": "article",
+        "language": "es",
+        "institutions": "Universidad San Francisco de Quito",
+        "cited_by_count": 3,
+    },
+])
+
+# -----------------------------
+# Scopus-like test files
+# -----------------------------
+scopus_columns = [
+    "Title",
+    "Authors",
+    "Year",
+    "Source title",
+    "Abstract",
+    "DOI",
+    "Document Type",
+    "Language of Original Document",
+    "Affiliations",
+    "Cited by",
+    "Author Keywords",
+    "Index Keywords",
+]
+
+scopus_core = pd.DataFrame([
+    {
+        "Title": "Safeguarding Intangible Cultural Heritage through Digital Archives",
+        "Authors": "Perez, Ana; Gomez, Luis",
+        "Year": 2022,
+        "Source title": "Journal of Cultural Heritage",
+        "Abstract": "Study on digital archives supporting intangible cultural heritage preservation.",
+        "DOI": "10.1000/scocore1",
+        "Document Type": "Article",
+        "Language of Original Document": "English",
+        "Affiliations": "Universidad Andina; Universidad de Cuenca",
+        "Cited by": 11,
+        "Author Keywords": "intangible heritage; digital preservation",
+        "Index Keywords": "archives; safeguarding",
+    },
+    {
+        "Title": "Community Participation in Intangible Heritage Preservation",
+        "Authors": "Lopez, Maria; Smith, John",
+        "Year": 2021,
+        "Source title": "Heritage and Society Review",
+        "Abstract": "Analysis of collaborative preservation models in living heritage projects.",
+        "DOI": "10.1000/scocore2",
+        "Document Type": "Article",
+        "Language of Original Document": "English",
+        "Affiliations": "Universidad Central del Ecuador; University of Leeds",
+        "Cited by": 7,
+        "Author Keywords": "community participation; living heritage",
+        "Index Keywords": "safeguarding; preservation",
+    },
+])
+
+scopus_exploratory_1 = pd.DataFrame([
+    {
+        "Title": "Festival Memory and Oral Traditions in the Andes",
+        "Authors": "Mena, Carlos; Ruiz, Elena",
+        "Year": 2020,
+        "Source title": "Andean Studies Journal",
+        "Abstract": "Explores oral transmission and festival memory in Andean communities.",
+        "DOI": "10.1000/scoexp11",
+        "Document Type": "Article",
+        "Language of Original Document": "Spanish",
+        "Affiliations": "FLACSO Ecuador",
+        "Cited by": 5,
+        "Author Keywords": "oral traditions; festivals",
+        "Index Keywords": "Andes; memory",
+    },
+    {
+        "Title": "Museums and Transmission of Traditional Knowledge",
+        "Authors": "Vega, Rosa; Lang, Peter",
+        "Year": 2019,
+        "Source title": "Museum Practice Quarterly",
+        "Abstract": "Evaluates museum mediation in transmitting traditional knowledge.",
+        "DOI": "10.1000/scoexp12",
+        "Document Type": "Article",
+        "Language of Original Document": "English",
+        "Affiliations": "Universidad de Salamanca",
+        "Cited by": 8,
+        "Author Keywords": "museums; traditional knowledge",
+        "Index Keywords": "transmission; safeguarding",
+    },
+    {
+        "Title": "Digital Storytelling for Safeguarding Living Heritage",
+        "Authors": "Torres, Lucia; Brown, Emma",
+        "Year": 2023,
+        "Source title": "Digital Humanities Heritage",
+        "Abstract": "Presents storytelling methods for community heritage preservation.",
+        "DOI": "10.1000/scoexp13",
+        "Document Type": "Article",
+        "Language of Original Document": "English",
+        "Affiliations": "Pontificia Universidad Católica del Ecuador",
+        "Cited by": 4,
+        "Author Keywords": "digital storytelling; living heritage",
+        "Index Keywords": "safeguarding; humanities",
+    },
+])
+
+scopus_exploratory_2 = pd.DataFrame([
+    {
+        "Title": "Education Policies for Intangible Heritage in Schools",
+        "Authors": "Leon, Patricia; Arias, Diego",
+        "Year": 2018,
+        "Source title": "Education and Heritage",
+        "Abstract": "Discusses school policies for transmitting intangible heritage.",
+        "DOI": "10.1000/scoexp21",
+        "Document Type": "Article",
+        "Language of Original Document": "Spanish",
+        "Affiliations": "Ministerio de Educación del Ecuador",
+        "Cited by": 6,
+        "Author Keywords": "education policy; schools",
+        "Index Keywords": "heritage; curriculum",
+    },
+    {
+        "Title": "Craftsmanship Networks and Local Identity",
+        "Authors": "Salazar, Hector; Green, Nina",
+        "Year": 2022,
+        "Source title": "Local Identity Review",
+        "Abstract": "Analyzes artisan networks and local identity construction.",
+        "DOI": "10.1000/scoexp22",
+        "Document Type": "Article",
+        "Language of Original Document": "English",
+        "Affiliations": "Universidad de Cuenca",
+        "Cited by": 7,
+        "Author Keywords": "craftsmanship; local identity",
+        "Index Keywords": "networks; artisans",
+    },
+    {
+        "Title": "Ritual Performance, Memory, and Safeguarding Strategies",
+        "Authors": "Acosta, Sofia; Herrera, Miguel",
+        "Year": 2021,
+        "Source title": "Performance Heritage Studies",
+        "Abstract": "Examines ritual performance as a strategy for community safeguarding.",
+        "DOI": "10.1000/scoexp23",
+        "Document Type": "Article",
+        "Language of Original Document": "Spanish",
+        "Affiliations": "Universidad San Francisco de Quito",
+        "Cited by": 3,
+        "Author Keywords": "ritual performance; memory",
+        "Index Keywords": "safeguarding; strategies",
+    },
+])
+
+files = {
+    "openalex_core_test.csv": openalex_core,
+    "openalex_exploratory_1_test.csv": openalex_exploratory_1,
+    "openalex_exploratory_2_test.csv": openalex_exploratory_2,
+    "scopus_core_test.csv": scopus_core,
+    "scopus_exploratory_1_test.csv": scopus_exploratory_1,
+    "scopus_exploratory_2_test.csv": scopus_exploratory_2,
+}
+
+for filename, df in files.items():
+    df.to_csv(base / filename, index=False, encoding="utf-8-sig")
+
+manifest = {
+    "description": "Archivos de prueba para pipeline SRA: OpenAlex y Scopus",
+    "counts": {
+        "openalex_core": 2,
+        "openalex_exploratory_1": 3,
+        "openalex_exploratory_2": 3,
+        "scopus_core": 2,
+        "scopus_exploratory_1": 3,
+        "scopus_exploratory_2": 3,
+    },
+    "files": list(files.keys()),
+}
+
+(base / "manifest_test_files.json").write_text(
+    json.dumps(manifest, ensure_ascii=False, indent=2),
+    encoding="utf-8"
+)
+
+readme = """Archivos de prueba generados
+
+Contenido:
+- OpenAlex core: 2 artículos
+- OpenAlex exploratory_1: 3 artículos
+- OpenAlex exploratory_2: 3 artículos
+- Scopus core: 2 artículos
+- Scopus exploratory_1: 3 artículos
+- Scopus exploratory_2: 3 artículos
+
+Uso sugerido:
+- Scopus: cargar los CSV directamente en la GUI.
+- OpenAlex: estos CSV simulan resultados descargados. Si tu flujo exige URL/API, usa estos archivos para pruebas unitarias o adapta la función de carga para leer CSV locales.
+"""
+(base / "README.txt").write_text(readme, encoding="utf-8")
+
+zip_path = Path("D:/prueba/test_archivos_core_exploratorias.zip")
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for p in base.iterdir():
+        zf.write(p, arcname=p.name)
+
+print(f"Generado: {zip_path}")
+print("Archivos:")
+for p in sorted(base.iterdir()):
+    print("-", p.name)
